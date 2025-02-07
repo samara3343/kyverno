@@ -2,21 +2,17 @@ package metrics
 
 import (
 	"fmt"
-	"reflect"
 
 	kyvernov1 "github.com/kyverno/kyverno/api/kyverno/v1"
-	"github.com/kyverno/kyverno/pkg/engine/response"
+	engineapi "github.com/kyverno/kyverno/pkg/engine/api"
+	datautils "github.com/kyverno/kyverno/pkg/utils/data"
 )
 
 func ParsePolicyValidationMode(validationFailureAction kyvernov1.ValidationFailureAction) (PolicyValidationMode, error) {
-	switch validationFailureAction {
-	case kyvernov1.Enforce:
+	if validationFailureAction.Enforce() {
 		return Enforce, nil
-	case kyvernov1.Audit:
-		return Audit, nil
-	default:
-		return "", fmt.Errorf("wrong validation failure action found %s. Allowed: '%s', '%s'", validationFailureAction, "enforce", "audit")
 	}
+	return Audit, nil
 }
 
 func ParsePolicyBackgroundMode(policy kyvernov1.PolicyInterface) PolicyBackgroundMode {
@@ -27,14 +23,17 @@ func ParsePolicyBackgroundMode(policy kyvernov1.PolicyInterface) PolicyBackgroun
 }
 
 func ParseRuleType(rule kyvernov1.Rule) RuleType {
-	if !reflect.DeepEqual(rule.Validation, kyvernov1.Validation{}) {
+	if rule.Validation != nil && !datautils.DeepEqual(*rule.Validation, kyvernov1.Validation{}) {
 		return Validate
 	}
-	if !reflect.DeepEqual(rule.Mutation, kyvernov1.Mutation{}) {
+	if rule.Mutation != nil && !datautils.DeepEqual(*rule.Mutation, kyvernov1.Mutation{}) {
 		return Mutate
 	}
-	if !reflect.DeepEqual(rule.Generation, kyvernov1.Generation{}) {
+	if rule.Generation != nil && !datautils.DeepEqual(*rule.Generation, kyvernov1.Generation{}) {
 		return Generate
+	}
+	if len(rule.VerifyImages) > 0 {
+		return ImageVerify
 	}
 	return EmptyRuleType
 }
@@ -54,14 +53,16 @@ func ParseResourceRequestOperation(requestOperationStr string) (ResourceRequestO
 	}
 }
 
-func ParseRuleTypeFromEngineRuleResponse(rule response.RuleResponse) RuleType {
-	switch rule.Type {
+func ParseRuleTypeFromEngineRuleResponse(rule engineapi.RuleResponse) RuleType {
+	switch rule.RuleType() {
 	case "Validation":
 		return Validate
 	case "Mutation":
 		return Mutate
 	case "Generation":
 		return Generate
+	case "ImageVerify":
+		return ImageVerify
 	default:
 		return EmptyRuleType
 	}
@@ -76,6 +77,12 @@ func GetPolicyInfos(policy kyvernov1.PolicyInterface) (string, string, PolicyTyp
 		policyType = Namespaced
 	}
 	backgroundMode := ParsePolicyBackgroundMode(policy)
-	validationMode, err := ParsePolicyValidationMode(policy.GetSpec().GetValidationFailureAction())
-	return name, namespace, policyType, backgroundMode, validationMode, err
+	isEnforce := policy.GetSpec().HasValidateEnforce()
+	var validationMode PolicyValidationMode
+	if isEnforce {
+		validationMode = Enforce
+	} else {
+		validationMode = Audit
+	}
+	return name, namespace, policyType, backgroundMode, validationMode, nil
 }

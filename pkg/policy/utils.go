@@ -2,68 +2,61 @@ package policy
 
 import (
 	kyvernov1 "github.com/kyverno/kyverno/api/kyverno/v1"
+	"github.com/kyverno/kyverno/ext/wildcard"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
-func isRunningPod(obj unstructured.Unstructured) bool {
-	objMap := obj.UnstructuredContent()
-	phase, ok, err := unstructured.NestedString(objMap, "status", "phase")
-	if !ok || err != nil {
+func resourceMatches(match kyvernov1.ResourceDescription, res unstructured.Unstructured, isNamespacedPolicy bool) bool {
+	if match.Name != "" && !wildcard.Match(match.Name, res.GetName()) {
 		return false
 	}
 
-	return phase == "Running"
-}
-
-// check if all slice elements are same
-func isMatchResourcesAllValid(rule kyvernov1.Rule) bool {
-	var kindlist []string
-	for _, all := range rule.MatchResources.All {
-		kindlist = append(kindlist, all.Kinds...)
-	}
-
-	if len(kindlist) == 0 {
-		return false
-	}
-
-	for i := 1; i < len(kindlist); i++ {
-		if kindlist[i] != kindlist[0] {
+	if len(match.Names) > 0 {
+		isMatch := false
+		for _, name := range match.Names {
+			if wildcard.Match(name, res.GetName()) {
+				isMatch = true
+				break
+			}
+		}
+		if !isMatch {
 			return false
 		}
+	}
+
+	if !isNamespacedPolicy && len(match.Namespaces) > 0 && !contains(match.Namespaces, res.GetNamespace()) {
+		return false
 	}
 	return true
 }
 
-func fetchUniqueKinds(rule kyvernov1.Rule) []string {
-	var kindlist []string
-
-	kindlist = append(kindlist, rule.MatchResources.Kinds...)
-
-	for _, all := range rule.MatchResources.Any {
-		kindlist = append(kindlist, all.Kinds...)
-	}
-
-	if isMatchResourcesAllValid(rule) {
-		for _, all := range rule.MatchResources.All {
-			kindlist = append(kindlist, all.Kinds...)
+func contains(slice []string, item string) bool {
+	for _, s := range slice {
+		if s == item {
+			return true
 		}
 	}
-
-	inResult := make(map[string]bool)
-	var result []string
-	for _, kind := range kindlist {
-		if _, ok := inResult[kind]; !ok {
-			inResult[kind] = true
-			result = append(result, kind)
-		}
-	}
-	return result
+	return false
 }
 
-func convertlist(ulists []unstructured.Unstructured) []*unstructured.Unstructured {
-	var result []*unstructured.Unstructured
-	for _, list := range ulists {
-		result = append(result, list.DeepCopy())
+func castPolicy(p interface{}) kyvernov1.PolicyInterface {
+	var policy kyvernov1.PolicyInterface
+	switch obj := p.(type) {
+	case *kyvernov1.ClusterPolicy:
+		policy = obj
+	case *kyvernov1.Policy:
+		policy = obj
 	}
-	return result
+	return policy
+}
+
+func policyKey(policy kyvernov1.PolicyInterface) string {
+	var policyNameNamespaceKey string
+
+	if policy.IsNamespaced() {
+		policyNameNamespaceKey = policy.GetNamespace() + "/" + policy.GetName()
+	} else {
+		policyNameNamespaceKey = policy.GetName()
+	}
+	return policyNameNamespaceKey
 }

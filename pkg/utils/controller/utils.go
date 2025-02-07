@@ -2,8 +2,8 @@ package controller
 
 import (
 	"context"
-	"reflect"
 
+	datautils "github.com/kyverno/kyverno/pkg/utils/data"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -15,24 +15,16 @@ type CreateClient[T metav1.Object] interface {
 	Create(context.Context, T, metav1.CreateOptions) (T, error)
 }
 
-type UpdateClient[T metav1.Object] interface {
-	Update(context.Context, T, metav1.UpdateOptions) (T, error)
-}
-
-type DeleteClient[T metav1.Object] interface {
-	Delete(context.Context, string, metav1.DeleteOptions) error
-}
-
-type DeleteCollectionClient[T metav1.Object] interface {
-	DeleteCollection(context.Context, metav1.DeleteOptions, metav1.ListOptions) error
-}
-
 type GetClient[T metav1.Object] interface {
 	Get(context.Context, string, metav1.GetOptions) (T, error)
 }
 
-type WatchClient[T metav1.Object] interface {
-	Watch(context.Context, metav1.ListOptions) (watch.Interface, error)
+type UpdateClient[T metav1.Object] interface {
+	Update(context.Context, T, metav1.UpdateOptions) (T, error)
+}
+
+type DeleteClient interface {
+	Delete(context.Context, string, metav1.DeleteOptions) error
 }
 
 type PatchClient[T metav1.Object] interface {
@@ -41,12 +33,19 @@ type PatchClient[T metav1.Object] interface {
 
 type ObjectClient[T metav1.Object] interface {
 	CreateClient[T]
-	UpdateClient[T]
-	DeleteClient[T]
-	DeleteCollectionClient[T]
 	GetClient[T]
-	WatchClient[T]
+	UpdateClient[T]
 	PatchClient[T]
+	DeleteClient
+	DeleteCollectionClient
+}
+
+type DeleteCollectionClient interface {
+	DeleteCollection(context.Context, metav1.DeleteOptions, metav1.ListOptions) error
+}
+
+type WatchClient interface {
+	Watch(context.Context, metav1.ListOptions) (watch.Interface, error)
 }
 
 type ListClient[T any] interface {
@@ -116,7 +115,7 @@ func CreateOrUpdate[T any, R Object[T], G Getter[R], S Setter[R]](ctx context.Co
 			if obj.GetResourceVersion() == "" {
 				return setter.Create(ctx, mutated, metav1.CreateOptions{})
 			} else {
-				if reflect.DeepEqual(obj, mutated) {
+				if datautils.DeepEqual(obj, mutated) {
 					return mutated, nil
 				} else {
 					return setter.Update(ctx, mutated, metav1.UpdateOptions{})
@@ -140,7 +139,7 @@ func Update[T interface {
 		var d T
 		return d, err
 	} else {
-		if reflect.DeepEqual(obj, mutated) {
+		if datautils.DeepEqual(obj, mutated) {
 			return mutated, nil
 		} else {
 			return setter.Update(ctx, mutated, metav1.UpdateOptions{})
@@ -151,23 +150,31 @@ func Update[T interface {
 func UpdateStatus[T interface {
 	metav1.Object
 	DeepCopy[T]
-}, S StatusClient[T]](ctx context.Context, obj T, setter S, build func(T) error,
-) (T, error) {
+}, S ObjectStatusClient[T]](
+	ctx context.Context,
+	obj T,
+	setter S,
+	build func(T) error,
+	cmp func(T, T) bool,
+) error {
 	mutated := obj.DeepCopy()
 	if err := build(mutated); err != nil {
-		var d T
-		return d, err
+		return err
 	} else {
-		if reflect.DeepEqual(obj, mutated) {
-			return mutated, nil
+		if cmp == nil {
+			cmp = datautils.DeepEqual[T]
+		}
+		if cmp(obj, mutated) {
+			return nil
 		} else {
-			return setter.UpdateStatus(ctx, mutated, metav1.UpdateOptions{})
+			_, err := setter.UpdateStatus(ctx, mutated, metav1.UpdateOptions{})
+			return err
 		}
 	}
 }
 
 func Cleanup[T any, R Object[T]](ctx context.Context, actual []R, expected []R, deleter Deleter) error {
-	keep := sets.NewString()
+	keep := sets.New[string]()
 	for _, obj := range expected {
 		keep.Insert(obj.GetName())
 	}

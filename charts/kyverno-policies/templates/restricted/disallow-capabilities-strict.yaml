@@ -2,31 +2,27 @@
 {{- if eq (include "kyverno-policies.podSecurityRestricted" (merge (dict "name" $name) .)) "true" }}
 {{- include "kyverno-policies.supportedKyvernoCheck" (dict "top" . "ver" ">= 1.6.0-0") }}
 apiVersion: kyverno.io/v1
-kind: ClusterPolicy
+kind: {{ .Values.policyKind }}
 metadata:
   name: {{ $name }}
   annotations:
+    {{- with .Values.autogenControllers }}
+    pod-policies.kyverno.io/autogen-controllers: {{ . }}
+    {{- end }}
     policies.kyverno.io/title: Disallow Capabilities (Strict)
     policies.kyverno.io/category: Pod Security Standards (Restricted)
     {{- if .Values.podSecuritySeverity }}
     policies.kyverno.io/severity: {{ .Values.podSecuritySeverity | quote }}
     {{- end }}
     policies.kyverno.io/minversion: 1.6.0
-    kyverno.io/kyverno-version: 1.6.0
-    kyverno.io/kubernetes-version: "1.22-1.23"
+    kyverno.io/kyverno-version: {{ default .Chart.AppVersion (include "kyverno-policies.kyvernoVersion" .) }}
+    kyverno.io/kubernetes-version: "{{ default .Chart.KubeVersion .Values.kubeVersionOverride }}"
     policies.kyverno.io/subject: Pod
     policies.kyverno.io/description: >-
       Adding capabilities other than `NET_BIND_SERVICE` is disallowed. In addition,
       all containers must explicitly drop `ALL` capabilities.
+  labels: {{ include "kyverno-policies.labels" . | nindent 4 }}
 spec:
-  {{- with index .Values "validationFailureActionByPolicy" $name }}
-  validationFailureAction: {{ toYaml . }}
-  {{- else }}
-  validationFailureAction: {{ .Values.validationFailureAction }}
-  {{- end }}
-  {{- with concat (index .Values "validationFailureActionOverrides" "all") (default list (index .Values "validationFailureActionOverrides" $name)) }}
-  validationFailureActionOverrides: {{ toYaml . | nindent 4 }}
-  {{- end }}
   background: {{ .Values.background }}
   failurePolicy: {{ .Values.failurePolicy }}
   rules:
@@ -61,7 +57,19 @@ spec:
           operator: NotEquals
           value: DELETE
       {{- end }}
+      {{- if not (quote .Values.skipBackgroundRequests | empty)  }}
+      skipBackgroundRequests: {{ .Values.skipBackgroundRequests }}
+      {{- end }}
       validate:
+        {{- with index .Values "validationFailureActionByPolicy" $name }}
+        failureAction: {{ toYaml . }}
+        {{- else }}
+        failureAction: {{ .Values.validationFailureAction }}
+        {{- end }}
+        {{- with concat (index .Values "validationFailureActionOverrides" "all") (default list (index .Values "validationFailureActionOverrides" $name)) }}
+        failureActionOverrides: {{ toYaml . | nindent 8 }}
+        {{- end }}
+        allowExistingViolations: {{ .Values.validationAllowExistingViolations }}
         message: >-
           Containers must drop `ALL` capabilities.
         foreach:
@@ -71,7 +79,7 @@ spec:
                 all:
                 - key: ALL
                   operator: AnyNotIn
-                  value: "{{`{{`}} element.securityContext.capabilities.drop[].to_upper(@) || `[]` {{`}}`}}"
+                  value: "{{`{{`}} element.securityContext.capabilities.drop[] || `[]` {{`}}`}}"
     - name: adding-capabilities-strict
       match:
         any:
@@ -103,7 +111,19 @@ spec:
           operator: NotEquals
           value: DELETE
       {{- end }}
+      {{- if not (quote .Values.skipBackgroundRequests | empty)  }}
+      skipBackgroundRequests: {{ .Values.skipBackgroundRequests }}
+      {{- end }}
       validate:
+        {{- with index .Values "validationFailureActionByPolicy" $name }}
+        failureAction: {{ toYaml . }}
+        {{- else }}
+        failureAction: {{ .Values.validationFailureAction }}
+        {{- end }}
+        {{- with concat (index .Values "validationFailureActionOverrides" "all") (default list (index .Values "validationFailureActionOverrides" $name)) }}
+        failureActionOverrides: {{ toYaml . | nindent 8 }}
+        {{- end }}
+        allowExistingViolations: {{ .Values.validationAllowExistingViolations }}
         message: >-
           Any capabilities added other than NET_BIND_SERVICE are disallowed.
         foreach:
@@ -111,7 +131,7 @@ spec:
             deny:
               conditions:
                 all:
-                - key: "{{`{{`}} element.securityContext.capabilities.add[].to_upper(@) || `[]` {{`}}`}}"
+                - key: "{{`{{`}} element.securityContext.capabilities.add[] || `[]` {{`}}`}}"
                   operator: AnyNotIn
                   value:
                   - NET_BIND_SERVICE

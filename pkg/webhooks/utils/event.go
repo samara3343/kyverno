@@ -1,14 +1,14 @@
 package utils
 
 import (
-	"github.com/kyverno/kyverno/pkg/engine/response"
+	"github.com/kyverno/kyverno/pkg/config"
+	engineapi "github.com/kyverno/kyverno/pkg/engine/api"
 	"github.com/kyverno/kyverno/pkg/event"
 )
 
 // GenerateEvents generates event info for the engine responses
-func GenerateEvents(engineResponses []*response.EngineResponse, blocked bool) []event.Info {
+func GenerateEvents(engineResponses []engineapi.EngineResponse, blocked bool, cfg config.Configuration) []event.Info {
 	var events []event.Info
-
 	//   - Some/All policies fail or error
 	//     - report failure events on policy
 	//     - report failure events on resource
@@ -16,29 +16,33 @@ func GenerateEvents(engineResponses []*response.EngineResponse, blocked bool) []
 	//     - report success event on resource
 	//   - Some/All policies skipped
 	//     - report skipped event on resource
-
 	for _, er := range engineResponses {
-		if er.IsEmpty() {
+		if er.IsEmpty() || er.Resource.GetName() == "" {
 			continue
 		}
-
 		if !er.IsSuccessful() {
-			for i, ruleResp := range er.PolicyResponse.Rules {
-				if ruleResp.Status == response.RuleStatusFail || ruleResp.Status == response.RuleStatusError {
-					e := event.NewPolicyFailEvent(event.AdmissionController, event.PolicyViolation, er, &er.PolicyResponse.Rules[i], blocked)
+			for _, ruleResp := range er.PolicyResponse.Rules {
+				if ruleResp.Status() == engineapi.RuleStatusFail || ruleResp.Status() == engineapi.RuleStatusError {
+					e := event.NewPolicyFailEvent(event.AdmissionController, event.PolicyViolation, er, ruleResp, blocked)
 					events = append(events, e)
 				}
-
 				if !blocked {
-					e := event.NewResourceViolationEvent(event.AdmissionController, event.PolicyViolation, er, &er.PolicyResponse.Rules[i])
+					e := event.NewResourceViolationEvent(event.AdmissionController, event.PolicyViolation, er, ruleResp)
 					events = append(events, e)
 				}
 			}
+		} else if er.IsSkipped() { // Handle PolicyException Event
+			for _, ruleResp := range er.PolicyResponse.Rules {
+				if ruleResp.Status() == engineapi.RuleStatusSkip && !blocked && ruleResp.IsException() {
+					events = append(events, event.NewPolicyExceptionEvents(er, ruleResp, event.AdmissionController)...)
+				}
+			}
 		} else if !er.IsSkipped() {
-			e := event.NewPolicyAppliedEvent(event.AdmissionController, er)
-			events = append(events, e)
+			if cfg.GetGenerateSuccessEvents() {
+				e := event.NewPolicyAppliedEvent(event.AdmissionController, er)
+				events = append(events, e)
+			}
 		}
 	}
-
 	return events
 }

@@ -1,15 +1,22 @@
-project_name: kyverno-cli 
+version: 2
+
+project_name: kyverno-cli
+
 before:
   hooks:
     - go mod download
+
 builds:
 - id: kyverno-cli
-  main: cmd/cli/kubectl-kyverno/main.go
+  # As mentioned in https://github.com/golang/go/issues/51831, to include build info, we should use go build <package>
+  # instead of go build main.go here.
+  # see https://goreleaser.com/customization/builds/
+  main: ./cmd/cli/kubectl-kyverno
   binary: kyverno
   env:
   - CGO_ENABLED=0
   ldflags:
-  - -s -w -X github.com/kyverno/kyverno/pkg/version.BuildVersion={{.Version}} -X github.com/kyverno/kyverno/pkg/version.BuildHash={{ .FullCommit }} -X github.com/kyverno/kyverno/pkg/version.BuildTime={{ .Date }}
+  - -s -w -X github.com/kyverno/kyverno/pkg/version.BuildVersion={{.Version}}
   goos:
     - linux
     - darwin
@@ -23,29 +30,47 @@ builds:
       goarch: s390x
     - goos: windows
       goarch: s390x
+
+signs:
+  - cmd: cosign
+    env:
+      - COSIGN_EXPERIMENTAL=1
+    certificate: '${artifact}.pem'
+    args:
+      - sign-blob
+      - --output-certificate=${certificate}
+      - --output-signature=${signature}
+      - ${artifact}
+      - --yes
+    artifacts: all
+    output: true
+
 archives:
 - id: kyverno-cli-archive
   name_template: |-
-    kyverno-cli_{{ .Tag }}_{{ .Os }}_{{ .Arch -}}
-    {{- with .Arm -}}
-      {{- if (eq . "6") -}}hf
-      {{- else -}}v{{- . -}}
-      {{- end -}}
-    {{- end -}}
+     kyverno-cli_{{ .Tag }}_{{ .Os }}_
+     {{- with .Arch -}}
+     {{- if eq . "amd64" -}}x86_64{{- else if eq . "386" -}}i386{{- else -}}{{- . -}}{{- end -}}
+     {{- end -}}
+     {{- with .Arm -}}
+     {{- if eq . "6" -}}hf{{- else -}}v{{- . -}}{{- end -}}
+     {{- end -}}
   builds:
     - kyverno-cli
   format_overrides:
     - goos: windows
       format: zip
-  replacements:
-    386: i386
-    amd64: x86_64
   files: ["LICENSE"]
+
 checksum:
-  name_template: "checksums.txt"
-  algorithm: sha256
+  name_template: checksums.txt
+
+source:
+  enabled: true
+
 release:
   prerelease: auto
+
 changelog:
   sort: asc
   filters:
@@ -53,4 +78,3 @@ changelog:
       - '^docs:'
       - typo
       - '^test:'
-

@@ -4,15 +4,16 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/go-logr/logr"
 	kyvernov1 "github.com/kyverno/kyverno/api/kyverno/v1"
 	"github.com/kyverno/kyverno/pkg/autogen"
-	"github.com/kyverno/kyverno/pkg/logging"
 	assertnew "github.com/stretchr/testify/assert"
 	"gotest.tools/assert"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
 func TestMergePatch(t *testing.T) {
+	var expectBytes = []byte(`{"apiVersion": "apps/v1","kind": "Deployment","metadata": {"name": "wordpress","labels": {"app": "wordpress"}},"spec": {"selector": {"matchLabels": {"app": "wordpress"}},"strategy": {"type": "Recreate"},"template": {"metadata": {"labels": {"app": "wordpress"}},"spec": {"containers": [{"name": "nginx","image": "nginx"},{"image": "wordpress:4.8-apache","name": "wordpress","ports": [{"containerPort": 80,"name": "wordpress"}],"volumeMounts": [{"name": "wordpress-persistent-storage","mountPath": "/var/www/html"}],"env": [{"name": "WORDPRESS_DB_HOST","value": "$(MYSQL_SERVICE)"},{"name": "WORDPRESS_DB_PASSWORD","valueFrom": {"secretKeyRef": {"name": "mysql-pass","key": "password"}}}]}],"volumes": [{"name": "wordpress-persistent-storage"}],"initContainers": [{"name": "init-command","image": "debian","command": ["echo $(WORDPRESS_SERVICE)","echo $(MYSQL_SERVICE)"]}]}}}}`)
 	testCases := []struct {
 		rawPolicy   []byte
 		rawResource []byte
@@ -163,13 +164,14 @@ func TestMergePatch(t *testing.T) {
 
 	for i, test := range testCases {
 		t.Logf("Running test %d...", i+1)
-		out, err := strategicMergePatch(logging.GlobalLogger(), string(test.rawResource), string(test.rawPolicy))
+		out, err := strategicMergePatch(logr.Discard(), string(test.rawResource), string(test.rawPolicy))
 		assert.NilError(t, err)
 		assert.DeepEqual(t, toJSON(t, test.expected), toJSON(t, out))
 	}
 }
 
 func Test_PolicyDeserilize(t *testing.T) {
+	var expectBytes = []byte(`{"apiVersion": "apps/v1","kind": "Deployment","metadata": {"name": "wordpress","labels": {"app": "wordpress"}},"spec": {"selector": {"matchLabels": {"app": "wordpress"}},"strategy": {"type": "Recreate"},"template": {"metadata": {"labels": {"app": "wordpress"}},"spec": {"containers": [{"name": "nginx","image": "nginx"},{"image": "wordpress:4.8-apache","name": "wordpress","ports": [{"containerPort": 80,"name": "wordpress"}],"volumeMounts": [{"name": "wordpress-persistent-storage","mountPath": "/var/www/html"}],"env": [{"name": "WORDPRESS_DB_HOST","value": "$(MYSQL_SERVICE)"},{"name": "WORDPRESS_DB_PASSWORD","valueFrom": {"secretKeyRef": {"name": "mysql-pass","key": "password"}}}]}],"volumes": [{"name": "wordpress-persistent-storage"}],"initContainers": [{"name": "init-command","image": "debian","command": ["echo $(WORDPRESS_SERVICE)","echo $(MYSQL_SERVICE)"]}]}}}}`)
 	rawPolicy := []byte(`
 {
   "apiVersion": "kyverno.io/v1",
@@ -178,7 +180,6 @@ func Test_PolicyDeserilize(t *testing.T) {
     "name": "set-image-pull-policy"
   },
   "spec": {
-    "validationFailureAction": "enforce",
     "rules": [
       {
         "name": "set-image-pull-policy",
@@ -243,11 +244,11 @@ func Test_PolicyDeserilize(t *testing.T) {
 	err := json.Unmarshal(rawPolicy, &policy)
 	assert.NilError(t, err)
 
-	overlayPatches := autogen.ComputeRules(&policy)[0].Mutation.GetPatchStrategicMerge()
+	overlayPatches := autogen.Default.ComputeRules(&policy, "")[0].Mutation.GetPatchStrategicMerge()
 	patchString, err := json.Marshal(overlayPatches)
 	assert.NilError(t, err)
 
-	out, err := strategicMergePatch(logging.GlobalLogger(), string(baseBytes), string(patchString))
+	out, err := strategicMergePatch(logr.Discard(), string(baseBytes), string(patchString))
 	assert.NilError(t, err)
 
 	var ep unstructured.Unstructured

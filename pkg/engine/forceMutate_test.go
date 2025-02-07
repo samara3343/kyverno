@@ -4,9 +4,12 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/go-logr/logr"
 	kyverno "github.com/kyverno/kyverno/api/kyverno/v1"
+	"github.com/kyverno/kyverno/pkg/config"
 	"github.com/kyverno/kyverno/pkg/engine/context"
-	"github.com/kyverno/kyverno/pkg/engine/utils"
+	"github.com/kyverno/kyverno/pkg/engine/jmespath"
+	kubeutils "github.com/kyverno/kyverno/pkg/utils/kube"
 	"gotest.tools/assert"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
@@ -97,14 +100,96 @@ func Test_ForceMutateSubstituteVars(t *testing.T) {
 	err := json.Unmarshal(rawPolicy, &policy)
 	assert.NilError(t, err)
 
-	resourceUnstructured, err := utils.ConvertToUnstructured(rawResource)
+	resourceUnstructured, err := kubeutils.BytesToUnstructured(rawResource)
 	assert.NilError(t, err)
-	ctx := context.NewContext()
+	jp := jmespath.New(config.NewDefaultConfiguration(false))
+	ctx := context.NewContext(jp)
 	err = context.AddResource(ctx, rawResource)
 	assert.NilError(t, err)
 
-	mutatedResource, err := ForceMutate(ctx, &policy, *resourceUnstructured)
+	mutatedResource, err := ForceMutate(ctx, logr.Discard(), &policy, *resourceUnstructured)
 	assert.NilError(t, err)
+
+	assert.DeepEqual(t, expectedResource, mutatedResource.UnstructuredContent())
+}
+
+func Test_ApplyForEachMutate(t *testing.T) {
+	rawPolicy := []byte(`
+    {
+        "apiVersion": "kyverno.io/v1",
+        "kind": "ClusterPolicy",
+        "metadata": {
+            "name": "add-label"
+        },
+        "spec": {
+            "rules": [
+                {
+                    "name": "add-name-label",
+                    "match": {
+                        "resources": {
+                            "kinds": [
+                                "Pod"
+                            ]
+                        }
+                    },
+                    "mutate": {
+                        "forEach": [
+                            {
+                                "patchStrategicMerge": {
+                                    "metadata": {
+                                        "labels": {
+                                            "appname": "{{request.object.metadata.name}}"
+                                        }
+                                    }
+                                },
+                                "forEach": [
+                                    {
+                                        "patchStrategicMerge": {
+                                            "metadata": {
+                                                "labels": {
+                                                    "nestedLabel": "nestedValue"
+                                                }
+                                            }
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+    }
+    `)
+
+	var policy kyverno.ClusterPolicy
+	err := json.Unmarshal(rawPolicy, &policy)
+	assert.NilError(t, err)
+
+	resourceUnstructured, err := kubeutils.BytesToUnstructured(rawResource)
+	assert.NilError(t, err)
+	jp := jmespath.New(config.NewDefaultConfiguration(false))
+	ctx := context.NewContext(jp)
+	err = context.AddResource(ctx, rawResource)
+	assert.NilError(t, err)
+
+	mutatedResource, err := ForceMutate(ctx, logr.Discard(), &policy, *resourceUnstructured)
+	assert.NilError(t, err)
+
+	expectedRawResource := []byte(`{
+		"apiVersion": "v1",
+		"kind":       "Pod",
+		"metadata": {
+			"labels": {
+				"nestedLabel": "nestedValue"
+			},
+			"name": "check-root-user"
+		},
+		"spec": {"containers": [{"image": "nginxinc/nginx-unprivileged", "name": "check-root-user", "securityContext": {"runAsNonRoot": true}}]}
+	}`)
+
+	var expectedResource interface{}
+	assert.NilError(t, json.Unmarshal(expectedRawResource, &expectedResource))
 
 	assert.DeepEqual(t, expectedResource, mutatedResource.UnstructuredContent())
 }
@@ -202,13 +287,14 @@ func Test_ForceMutateSubstituteVarsWithPatchesJson6902(t *testing.T) {
 	err := json.Unmarshal(rawPolicy, &policy)
 	assert.NilError(t, err)
 
-	resourceUnstructured, err := utils.ConvertToUnstructured(rawResource)
+	resourceUnstructured, err := kubeutils.BytesToUnstructured(rawResource)
 	assert.NilError(t, err)
-	ctx := context.NewContext()
+	jp := jmespath.New(config.NewDefaultConfiguration(false))
+	ctx := context.NewContext(jp)
 	err = context.AddResource(ctx, rawResource)
 	assert.NilError(t, err)
 
-	mutatedResource, err := ForceMutate(ctx, &policy, *resourceUnstructured)
+	mutatedResource, err := ForceMutate(ctx, logr.Discard(), &policy, *resourceUnstructured)
 	assert.NilError(t, err)
 
 	assert.DeepEqual(t, expectedResource.UnstructuredContent(), mutatedResource.UnstructuredContent())
@@ -288,13 +374,14 @@ func Test_ForceMutateSubstituteVarsWithPatchStrategicMerge(t *testing.T) {
 	err := json.Unmarshal(rawPolicy, &policy)
 	assert.NilError(t, err)
 
-	resourceUnstructured, err := utils.ConvertToUnstructured(rawResource)
+	resourceUnstructured, err := kubeutils.BytesToUnstructured(rawResource)
 	assert.NilError(t, err)
-	ctx := context.NewContext()
+	jp := jmespath.New(config.NewDefaultConfiguration(false))
+	ctx := context.NewContext(jp)
 	err = context.AddResource(ctx, rawResource)
 	assert.NilError(t, err)
 
-	mutatedResource, err := ForceMutate(ctx, &policy, *resourceUnstructured)
+	mutatedResource, err := ForceMutate(ctx, logr.Discard(), &policy, *resourceUnstructured)
 	assert.NilError(t, err)
 
 	assert.DeepEqual(t, expectedResource, mutatedResource.UnstructuredContent())

@@ -2,15 +2,39 @@ package utils
 
 import (
 	"fmt"
-	"strconv"
-	"strings"
 
 	jsonpatch "github.com/evanphx/json-patch/v5"
-	commonAnchor "github.com/kyverno/kyverno/pkg/engine/anchor"
+	kyvernov1 "github.com/kyverno/kyverno/api/kyverno/v1"
+	engineapi "github.com/kyverno/kyverno/pkg/engine/api"
 	"github.com/kyverno/kyverno/pkg/logging"
 	jsonutils "github.com/kyverno/kyverno/pkg/utils/json"
+	"k8s.io/apiextensions-apiserver/pkg/apis/apiextensions"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
+
+func IsDeleteRequest(ctx engineapi.PolicyContext) bool {
+	if ctx == nil {
+		return false
+	}
+
+	if op := ctx.Operation(); string(op) != "" {
+		return op == kyvernov1.Delete
+	}
+
+	// if the NewResource is empty, the request is a DELETE
+	newResource := ctx.NewResource()
+	return IsEmptyUnstructured(&newResource)
+}
+
+func IsEmptyUnstructured(u *unstructured.Unstructured) bool {
+	if u == nil {
+		return true
+	}
+	if u.Object == nil {
+		return true
+	}
+	return false
+}
 
 // ApplyPatches patches given resource with given patches and returns patched document
 // return original resource if any error occurs
@@ -50,50 +74,41 @@ func ApplyPatchNew(resource, patch []byte) ([]byte, error) {
 	return patchedResource, err
 }
 
-// ConvertToUnstructured converts the resource to unstructured format
-func ConvertToUnstructured(data []byte) (*unstructured.Unstructured, error) {
-	resource := &unstructured.Unstructured{}
-	err := resource.UnmarshalJSON(data)
-	if err != nil {
-		return nil, err
+func TransformConditions(original apiextensions.JSON) (interface{}, error) {
+	if original == nil {
+		return kyvernov1.AnyAllConditions{}, nil
 	}
-	return resource, nil
+
+	switch typedValue := original.(type) {
+	case *kyvernov1.AnyAllConditions:
+		if typedValue == nil {
+			return kyvernov1.AnyAllConditions{}, nil
+		}
+		return *typedValue.DeepCopy(), nil
+	case kyvernov1.AnyAllConditions:
+		return *typedValue.DeepCopy(), nil
+	case []kyvernov1.Condition: // backwards compatibility
+		var copies []kyvernov1.Condition
+		for _, condition := range typedValue {
+			copies = append(copies, *condition.DeepCopy())
+		}
+		return copies, nil
+	}
+	return nil, fmt.Errorf("invalid preconditions")
 }
 
-// GetAnchorsFromMap gets the conditional anchor map
-func GetAnchorsFromMap(anchorsMap map[string]interface{}) map[string]interface{} {
-	result := make(map[string]interface{})
-
-	for key, value := range anchorsMap {
-		if commonAnchor.IsConditionAnchor(key) {
-			result[key] = value
-		}
+func IsSameRuleResponse(r1 *engineapi.RuleResponse, r2 *engineapi.RuleResponse) bool {
+	if r1.Name() != r2.Name() ||
+		r1.RuleType() != r2.RuleType() ||
+		r1.Message() != r2.Message() ||
+		r1.Status() != r2.Status() {
+		return false
 	}
 
-	return result
+	return true
 }
 
-func JsonPointerToJMESPath(jsonPointer string) string {
-	var sb strings.Builder
-	tokens := strings.Split(jsonPointer, "/")
-	i := 0
-	for _, t := range tokens {
-		if t == "" {
-			continue
-		}
-
-		if _, err := strconv.Atoi(t); err == nil {
-			sb.WriteString(fmt.Sprintf("[%s]", t))
-			continue
-		}
-
-		if i > 0 {
-			sb.WriteString(".")
-		}
-
-		sb.WriteString(t)
-		i++
-	}
-
-	return sb.String()
+func IsUpdateRequest(ctx engineapi.PolicyContext) bool {
+	// is the OldObject and NewObject are available, the request is an UPDATE
+	return (ctx.OldResource().Object != nil && ctx.NewResource().Object != nil) || ctx.Operation() == kyvernov1.Update
 }

@@ -3,16 +3,18 @@ package wildcards
 import (
 	"strings"
 
-	commonAnchor "github.com/kyverno/kyverno/pkg/engine/anchor"
-	wildcard "github.com/kyverno/kyverno/pkg/utils/wildcard"
+	"github.com/kyverno/kyverno/ext/wildcard"
+	"github.com/kyverno/kyverno/pkg/engine/anchor"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // ReplaceInSelector replaces label selector keys and values containing
 // wildcard characters with matching keys and values from the resource labels.
-func ReplaceInSelector(labelSelector *metav1.LabelSelector, resourceLabels map[string]string) {
+func ReplaceInSelector(labelSelector *metav1.LabelSelector, resourceLabels map[string]string) *metav1.LabelSelector {
+	labelSelector = labelSelector.DeepCopy()
 	result := replaceWildcardsInMapKeyValues(labelSelector.MatchLabels, resourceLabels)
 	labelSelector.MatchLabels = result
+	return labelSelector
 }
 
 // replaceWildcardsInMap will expand  the "key" and "value" and will replace wildcard characters
@@ -27,7 +29,6 @@ func replaceWildcardsInMapKeyValues(patternMap map[string]string, resourceMap ma
 			result[k] = v
 		}
 	}
-
 	return result
 }
 
@@ -41,12 +42,10 @@ func expandWildcards(k, v string, resourceMap map[string]string, matchValue, rep
 			}
 		}
 	}
-
 	if replace {
 		k = replaceWildCardChars(k)
 		v = replaceWildCardChars(v)
 	}
-
 	return k, v
 }
 
@@ -78,23 +77,22 @@ func ExpandInMetadata(patternMap, resourceMap map[string]interface{}) map[string
 	if labels != nil {
 		metadata[labelsKey] = labels
 	}
-
 	annotationsKey, annotations := expandWildcardsInTag("annotations", patternMetadata, resourceMetadata)
 	if annotations != nil {
 		metadata[annotationsKey] = annotations
 	}
-
 	return patternMap
 }
 
 func getPatternValue(tag string, pattern map[string]interface{}) (string, interface{}) {
 	for k, v := range pattern {
-		k2, _ := commonAnchor.RemoveAnchor(k)
-		if k2 == tag {
+		if k == tag {
+			return k, v
+		}
+		if a := anchor.Parse(k); a != nil && a.Key() == tag {
 			return k, v
 		}
 	}
-
 	return "", nil
 }
 
@@ -119,7 +117,10 @@ func getValueAsStringMap(key string, data interface{}) (string, map[string]strin
 		return "", nil
 	}
 
-	dataMap := data.(map[string]interface{})
+	dataMap, ok := data.(map[string]interface{})
+	if !ok {
+		return "", nil
+	}
 	patternKey, val := getPatternValue(key, dataMap)
 
 	if val == nil {
@@ -127,7 +128,13 @@ func getValueAsStringMap(key string, data interface{}) (string, map[string]strin
 	}
 
 	result := map[string]string{}
-	for k, v := range val.(map[string]interface{}) {
+
+	valMap, ok := val.(map[string]interface{})
+	if !ok {
+		return "", nil
+	}
+
+	for k, v := range valMap {
 		result[k] = v.(string)
 	}
 
@@ -140,17 +147,16 @@ func replaceWildcardsInMapKeys(patternData, resourceData map[string]string) map[
 	results := map[string]interface{}{}
 	for k, v := range patternData {
 		if wildcard.ContainsWildcard(k) {
-			anchorFreeKey, anchorPrefix := commonAnchor.RemoveAnchor(k)
-			matchK, _ := expandWildcards(anchorFreeKey, v, resourceData, false, false)
-			if anchorPrefix != "" {
-				matchK = commonAnchor.AddAnchor(matchK, anchorPrefix)
+			if a := anchor.Parse(k); a != nil {
+				matchK, _ := expandWildcards(a.Key(), v, resourceData, false, false)
+				results[anchor.String(a.Type(), matchK)] = v
+			} else {
+				matchK, _ := expandWildcards(k, v, resourceData, false, false)
+				results[matchK] = v
 			}
-
-			results[matchK] = v
 		} else {
 			results[k] = v
 		}
 	}
-
 	return results
 }

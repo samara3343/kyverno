@@ -6,10 +6,10 @@ import (
 	"strings"
 
 	"github.com/go-logr/logr"
-	"github.com/kyverno/kyverno/pkg/engine/common"
+	"github.com/kyverno/kyverno/ext/wildcard"
 	"github.com/kyverno/kyverno/pkg/engine/context"
 	"github.com/kyverno/kyverno/pkg/engine/operator"
-	wildcard "github.com/kyverno/kyverno/pkg/utils/wildcard"
+	"github.com/kyverno/kyverno/pkg/engine/pattern"
 )
 
 // NewAnyInHandler returns handler to manage AnyIn operations
@@ -31,7 +31,7 @@ func (anyin AnyInHandler) Evaluate(key, value interface{}) bool {
 	switch typedKey := key.(type) {
 	case string:
 		return anyin.validateValueWithStringPattern(typedKey, value)
-	case int, int32, int64, float32, float64:
+	case int, int32, int64, float32, float64, bool:
 		return anyin.validateValueWithStringPattern(fmt.Sprint(typedKey), value)
 	case []interface{}:
 		var stringSlice []string
@@ -101,7 +101,7 @@ func anyKeyExistsInArray(key string, value interface{}, log logr.Logger) (invali
 }
 
 func handleRange(key string, value interface{}, log logr.Logger) bool {
-	if !common.ValidateValueWithPattern(log, key, value) {
+	if !pattern.Validate(log, key, value) {
 		return false
 	} else {
 		return true
@@ -129,6 +129,14 @@ func anySetExistsInArray(key []string, value interface{}, log logr.Logger, anyNo
 		for _, val := range valuesAvailable {
 			valueSlice = append(valueSlice, fmt.Sprint(val))
 		}
+		if anyNotIn {
+			return false, isAnyNotIn(key, valueSlice)
+		}
+		return false, isAnyIn(key, valueSlice)
+
+	case int, int32, int64, float32, float64, bool:
+		var valueSlice []string
+		valueSlice = append(valueSlice, fmt.Sprint(value))
 		if anyNotIn {
 			return false, isAnyNotIn(key, valueSlice)
 		}
@@ -200,16 +208,21 @@ func isAnyIn(key []string, value []string) bool {
 
 // isAnyNotIn checks if any of the values in S1 are not in S2
 func isAnyNotIn(key []string, value []string) bool {
-	found := 0
 	for _, valKey := range key {
+		matchFound := false
+
 		for _, valValue := range value {
 			if wildcard.Match(valKey, valValue) || wildcard.Match(valValue, valKey) {
-				found++
+				matchFound = true
 				break
 			}
 		}
+
+		if !matchFound {
+			return true
+		}
 	}
-	return found < len(key)
+	return false
 }
 
 func (anyin AnyInHandler) validateValueWithBoolPattern(_ bool, _ interface{}) bool {

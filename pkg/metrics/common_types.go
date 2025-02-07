@@ -27,6 +27,7 @@ const (
 	Validate      RuleType = "validate"
 	Mutate        RuleType = "mutate"
 	Generate      RuleType = "generate"
+	ImageVerify   RuleType = "imageVerify"
 	EmptyRuleType RuleType = "-"
 )
 
@@ -73,8 +74,10 @@ const (
 type ClientType string
 
 const (
-	KubeDynamicClient  ClientType = "dynamic"
+	DynamicClient      ClientType = "dynamic"
 	KubeClient         ClientType = "kubeclient"
 	KyvernoClient      ClientType = "kyverno"
+	MetadataClient     ClientType = "metadata"
+	ApiServerClient    ClientType = "apiserver"
 	PolicyReportClient ClientType = "policyreport"
 )

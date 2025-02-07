@@ -1,8 +1,8 @@
 apiVersion: v2
 type: application
 name: kyverno-policies
-version: v2.5.5
-appVersion: v1.7.3
+version: v0.0.0
+appVersion: latest
 icon: https://github.com/kyverno/kyverno/raw/main/img/logo.png
 description: Kubernetes Pod Security Standards implemented as Kyverno policies
 keywords:
@@ -15,29 +15,18 @@ home: https://kyverno.io/policies/
 sources:
   - https://github.com/kyverno/policies
 maintainers:
-  - name: Nirmata
-    url: https://kyverno.io/
-kubeVersion: ">=1.16.0-0"
+  - name: kyverno-maintainers
+    email: cncf-kyverno-maintainers@lists.cncf.io
+kubeVersion: ">=1.25.0-0"
 annotations:
   artifacthub.io/operator: "false"
   artifacthub.io/prerelease: "false"
-  # valid kinds are: added, changed, deprecated, removed, fixed and security
   artifacthub.io/changes: |
+    - kind: removed
+      description: Remove spec.validationFailureAction field from policies as it is deprecated
     - kind: added
-      description: Add possibility to manually set kyvernoVersion and avoid autodetection
-    - kind: added
-      description: Support for artifacthub.io/changes annotation
+      description: Add spec.validate[*].failureAction field to policies
     - kind: fixed
-      description: Fix Kyverno version check when image tag contains registry port number
-    - kind: fixed
-      description: Ensure preconditions are present with default values
+      description: Fix the merging of policyExclude customizations to avoid wrong overrides
     - kind: added
-      description: Support for failurePolicy setting in kyverno-policies helm chart
-    - kind: added
-      description: Add possibility to set validationFailureAction by Policy
-    - kind: added
-      description: Added ability to get additional policies from restricted
-    - kind: fixed
-      description: Applied fix in preconditions for background mode
-    - kind: added
-      description: Added case insensitivity guarantees to disallow-capabilities-strict
+      description: Add spec.validate[*].allowExistingViolations field to policies
