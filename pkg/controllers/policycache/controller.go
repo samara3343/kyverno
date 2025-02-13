@@ -8,6 +8,7 @@ import (
 	kyvernov1 "github.com/kyverno/kyverno/api/kyverno/v1"
 	kyvernov1informers "github.com/kyverno/kyverno/pkg/client/informers/externalversions/kyverno/v1"
 	kyvernov1listers "github.com/kyverno/kyverno/pkg/client/listers/kyverno/v1"
+	"github.com/kyverno/kyverno/pkg/clients/dclient"
 	"github.com/kyverno/kyverno/pkg/controllers"
 	pcache "github.com/kyverno/kyverno/pkg/policycache"
 	controllerutils "github.com/kyverno/kyverno/pkg/utils/controller"
@@ -38,24 +39,35 @@ type controller struct {
 	polLister  kyvernov1listers.PolicyLister
 
 	// queue
-	queue workqueue.RateLimitingInterface
+	queue workqueue.TypedRateLimitingInterface[any]
+
+	// client
+	client dclient.Interface
 }
 
-func NewController(pcache pcache.Cache, cpolInformer kyvernov1informers.ClusterPolicyInformer, polInformer kyvernov1informers.PolicyInformer) Controller {
+func NewController(client dclient.Interface, pcache pcache.Cache, cpolInformer kyvernov1informers.ClusterPolicyInformer, polInformer kyvernov1informers.PolicyInformer) Controller {
 	c := controller{
 		cache:      pcache,
 		cpolLister: cpolInformer.Lister(),
 		polLister:  polInformer.Lister(),
-		queue:      workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), ControllerName),
+		queue: workqueue.NewTypedRateLimitingQueueWithConfig(
+			workqueue.DefaultTypedControllerRateLimiter[any](),
+			workqueue.TypedRateLimitingQueueConfig[any]{Name: ControllerName},
+		),
+		client: client,
 	}
-	controllerutils.AddDefaultEventHandlers(logger, cpolInformer.Informer(), c.queue)
-	controllerutils.AddDefaultEventHandlers(logger, polInformer.Informer(), c.queue)
+	if _, _, err := controllerutils.AddDefaultEventHandlers(logger, cpolInformer.Informer(), c.queue); err != nil {
+		logger.Error(err, "failed to register event handlers")
+	}
+	if _, _, err := controllerutils.AddDefaultEventHandlers(logger, polInformer.Informer(), c.queue); err != nil {
+		logger.Error(err, "failed to register event handlers")
+	}
 	return &c
 }
 
 func (c *controller) WarmUp() error {
-	logger.Info("warming up ...")
-	defer logger.Info("warm up done")
+	logger.V(4).Info("warming up ...")
+	defer logger.V(4).Info("warm up done")
 
 	pols, err := c.polLister.Policies(metav1.NamespaceAll).List(labels.Everything())
 	if err != nil {
@@ -65,7 +77,12 @@ func (c *controller) WarmUp() error {
 		if key, err := cache.MetaNamespaceKeyFunc(policy); err != nil {
 			return err
 		} else {
-			c.cache.Set(key, policy)
+			if policy.IsReady() {
+				return c.cache.Set(key, policy, c.client.Discovery())
+			} else {
+				c.cache.Unset(key)
+				return nil
+			}
 		}
 	}
 	cpols, err := c.cpolLister.List(labels.Everything())
@@ -76,7 +93,12 @@ func (c *controller) WarmUp() error {
 		if key, err := cache.MetaNamespaceKeyFunc(policy); err != nil {
 			return err
 		} else {
-			c.cache.Set(key, policy)
+			if policy.IsReady() {
+				return c.cache.Set(key, policy, c.client.Discovery())
+			} else {
+				c.cache.Unset(key)
+				return nil
+			}
 		}
 	}
 	return nil
@@ -94,9 +116,17 @@ func (c *controller) reconcile(ctx context.Context, logger logr.Logger, key, nam
 		}
 		return err
 	}
-	// TODO: check resource version ?
-	c.cache.Set(key, policy)
-	return nil
+	if policy.AdmissionProcessingEnabled() && !policy.GetSpec().CustomWebhookMatchConditions() {
+		if policy.IsReady() {
+			return c.cache.Set(key, policy, c.client.Discovery())
+		} else {
+			c.cache.Unset(key)
+			return nil
+		}
+	} else {
+		c.cache.Unset(key)
+		return nil
+	}
 }
 
 func (c *controller) loadPolicy(namespace, name string) (kyvernov1.PolicyInterface, error) {

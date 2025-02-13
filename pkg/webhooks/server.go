@@ -5,167 +5,181 @@ import (
 	"crypto/tls"
 	"fmt"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/julienschmidt/httprouter"
-	kyvernov1 "github.com/kyverno/kyverno/api/kyverno/v1"
+	"github.com/kyverno/kyverno/api/kyverno"
+	"github.com/kyverno/kyverno/pkg/clients/dclient"
 	"github.com/kyverno/kyverno/pkg/config"
-	engineutils "github.com/kyverno/kyverno/pkg/engine/utils"
 	"github.com/kyverno/kyverno/pkg/logging"
+	"github.com/kyverno/kyverno/pkg/metrics"
 	"github.com/kyverno/kyverno/pkg/toggle"
-	"github.com/kyverno/kyverno/pkg/utils"
-	admissionutils "github.com/kyverno/kyverno/pkg/utils/admission"
 	controllerutils "github.com/kyverno/kyverno/pkg/utils/controller"
 	runtimeutils "github.com/kyverno/kyverno/pkg/utils/runtime"
 	"github.com/kyverno/kyverno/pkg/webhooks/handlers"
 	admissionv1 "k8s.io/api/admission/v1"
-	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
-	authenticationv1 "k8s.io/api/authentication/v1"
-	coordinationv1 "k8s.io/api/coordination/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/types"
+	rbacv1listers "k8s.io/client-go/listers/rbac/v1"
 )
-
-// DebugModeOptions holds the options to configure debug mode
-type DebugModeOptions struct {
-	// DumpPayload is used to activate/deactivate debug mode.
-	DumpPayload bool
-}
-
-// AdmissionRequestPayload holds a copy of the AdmissionRequest payload
-type AdmissionRequestPayload struct {
-	UID                types.UID                    `json:"uid"`
-	Kind               metav1.GroupVersionKind      `json:"kind"`
-	Resource           metav1.GroupVersionResource  `json:"resource"`
-	SubResource        string                       `json:"subResource,omitempty"`
-	RequestKind        *metav1.GroupVersionKind     `json:"requestKind,omitempty"`
-	RequestResource    *metav1.GroupVersionResource `json:"requestResource,omitempty"`
-	RequestSubResource string                       `json:"requestSubResource,omitempty"`
-	Name               string                       `json:"name,omitempty"`
-	Namespace          string                       `json:"namespace,omitempty"`
-	Operation          string                       `json:"operation"`
-	UserInfo           authenticationv1.UserInfo    `json:"userInfo"`
-	Object             unstructured.Unstructured    `json:"object,omitempty"`
-	OldObject          unstructured.Unstructured    `json:"oldObject,omitempty"`
-	DryRun             *bool                        `json:"dryRun,omitempty"`
-	Options            unstructured.Unstructured    `json:"options,omitempty"`
-}
-
-func newAdmissionRequestPayload(rq *admissionv1.AdmissionRequest) (*AdmissionRequestPayload, error) {
-	newResource, oldResource, err := utils.ExtractResources(nil, rq)
-	if err != nil {
-		return nil, err
-	}
-	options := new(unstructured.Unstructured)
-	if rq.Options.Raw != nil {
-		options, err = engineutils.ConvertToUnstructured(rq.Options.Raw)
-		if err != nil {
-			return nil, err
-		}
-	}
-	return redactPayload(&AdmissionRequestPayload{
-		UID:                rq.UID,
-		Kind:               rq.Kind,
-		Resource:           rq.Resource,
-		SubResource:        rq.SubResource,
-		RequestKind:        rq.RequestKind,
-		RequestResource:    rq.RequestResource,
-		RequestSubResource: rq.RequestSubResource,
-		Name:               rq.Name,
-		Namespace:          rq.Namespace,
-		Operation:          string(rq.Operation),
-		UserInfo:           rq.UserInfo,
-		Object:             newResource,
-		OldObject:          oldResource,
-		DryRun:             rq.DryRun,
-		Options:            *options,
-	})
-}
-
-func redactPayload(payload *AdmissionRequestPayload) (*AdmissionRequestPayload, error) {
-	if strings.EqualFold(payload.Kind.Kind, "Secret") {
-		if payload.Object.Object != nil {
-			obj, err := utils.RedactSecret(&payload.Object)
-			if err != nil {
-				return nil, err
-			}
-			payload.Object = obj
-		}
-		if payload.OldObject.Object != nil {
-			oldObj, err := utils.RedactSecret(&payload.OldObject)
-			if err != nil {
-				return nil, err
-			}
-			payload.OldObject = oldObj
-		}
-	}
-	return payload, nil
-}
 
 type Server interface {
 	// Run TLS server in separate thread and returns control immediately
-	Run(<-chan struct{})
+	Run()
 	// Stop TLS server and returns control after the server is shut down
-	Stop(context.Context)
-	// Cleanup returns the chanel used to wait for the server to clean up resources
-	Cleanup() <-chan struct{}
-}
-
-type PolicyHandlers interface {
-	// Mutate performs the mutation of policy resources
-	Mutate(logr.Logger, *admissionv1.AdmissionRequest, time.Time) *admissionv1.AdmissionResponse
-	// Validate performs the validation check on policy resources
-	Validate(logr.Logger, *admissionv1.AdmissionRequest, time.Time) *admissionv1.AdmissionResponse
-}
-
-type ResourceHandlers interface {
-	// Mutate performs the mutation of kube resources
-	Mutate(logr.Logger, *admissionv1.AdmissionRequest, string, time.Time) *admissionv1.AdmissionResponse
-	// Validate performs the validation check on kube resources
-	Validate(logr.Logger, *admissionv1.AdmissionRequest, string, time.Time) *admissionv1.AdmissionResponse
+	Stop()
 }
 
 type server struct {
 	server      *http.Server
 	runtime     runtimeutils.Runtime
-	mwcClient   controllerutils.DeleteClient[*admissionregistrationv1.MutatingWebhookConfiguration]
-	vwcClient   controllerutils.DeleteClient[*admissionregistrationv1.ValidatingWebhookConfiguration]
-	leaseClient controllerutils.DeleteClient[*coordinationv1.Lease]
-	cleanUp     chan struct{}
+	mwcClient   controllerutils.DeleteCollectionClient
+	vwcClient   controllerutils.DeleteCollectionClient
+	leaseClient controllerutils.DeleteClient
 }
 
 type TlsProvider func() ([]byte, []byte, error)
 
 // NewServer creates new instance of server accordingly to given configuration
 func NewServer(
+	ctx context.Context,
 	policyHandlers PolicyHandlers,
 	resourceHandlers ResourceHandlers,
+	exceptionHandlers ExceptionHandlers,
+	celExceptionHandlers CELExceptionHandlers,
+	globalContextHandlers GlobalContextHandlers,
 	configuration config.Configuration,
+	metricsConfig metrics.MetricsConfigManager,
 	debugModeOpts DebugModeOptions,
 	tlsProvider TlsProvider,
-	mwcClient controllerutils.DeleteClient[*admissionregistrationv1.MutatingWebhookConfiguration],
-	vwcClient controllerutils.DeleteClient[*admissionregistrationv1.ValidatingWebhookConfiguration],
-	leaseClient controllerutils.DeleteClient[*coordinationv1.Lease],
+	mwcClient controllerutils.DeleteCollectionClient,
+	vwcClient controllerutils.DeleteCollectionClient,
+	leaseClient controllerutils.DeleteClient,
 	runtime runtimeutils.Runtime,
+	rbLister rbacv1listers.RoleBindingLister,
+	crbLister rbacv1listers.ClusterRoleBindingLister,
+	discovery dclient.IDiscovery,
+	webhookServerPort int32,
 ) Server {
 	mux := httprouter.New()
 	resourceLogger := logger.WithName("resource")
 	policyLogger := logger.WithName("policy")
+	exceptionLogger := logger.WithName("exception")
+	celExceptionLogger := logger.WithName("cel-exception")
+	globalContextLogger := logger.WithName("globalcontext")
 	verifyLogger := logger.WithName("verify")
-	registerWebhookHandlers(resourceLogger.WithName("mutate"), mux, config.MutatingWebhookServicePath, configuration, resourceHandlers.Mutate, debugModeOpts)
-	registerWebhookHandlers(resourceLogger.WithName("validate"), mux, config.ValidatingWebhookServicePath, configuration, resourceHandlers.Validate, debugModeOpts)
-	mux.HandlerFunc("POST", config.PolicyMutatingWebhookServicePath, admission(policyLogger.WithName("mutate"), filter(configuration, policyHandlers.Mutate), debugModeOpts))
-	mux.HandlerFunc("POST", config.PolicyValidatingWebhookServicePath, admission(policyLogger.WithName("validate"), filter(configuration, policyHandlers.Validate), debugModeOpts))
-	mux.HandlerFunc("POST", config.VerifyMutatingWebhookServicePath, admission(verifyLogger.WithName("mutate"), handlers.Verify(), DebugModeOptions{}))
+	vpolLogger := logger.WithName("vpol")
+	registerWebhookHandlersWithAll(
+		mux,
+		"MUTATE",
+		config.MutatingWebhookServicePath,
+		resourceHandlers.Mutation,
+		func(handler handlers.AdmissionHandler) handlers.HttpHandler {
+			return handler.
+				WithFilter(configuration).
+				WithProtection(toggle.FromContext(ctx).ProtectManagedResources()).
+				WithDump(debugModeOpts.DumpPayload).
+				WithTopLevelGVK(discovery).
+				WithRoles(rbLister, crbLister).
+				WithOperationFilter(admissionv1.Create, admissionv1.Update, admissionv1.Connect).
+				WithMetrics(resourceLogger, metricsConfig.Config(), metrics.WebhookMutating).
+				WithAdmission(resourceLogger.WithName("mutate"))
+		},
+	)
+	registerWebhookHandlersWithAll(
+		mux,
+		"VALIDATE",
+		config.ValidatingWebhookServicePath,
+		resourceHandlers.Validation,
+		func(handler handlers.AdmissionHandler) handlers.HttpHandler {
+			return handler.
+				WithFilter(configuration).
+				WithProtection(toggle.FromContext(ctx).ProtectManagedResources()).
+				WithDump(debugModeOpts.DumpPayload).
+				WithTopLevelGVK(discovery).
+				WithRoles(rbLister, crbLister).
+				WithMetrics(resourceLogger, metricsConfig.Config(), metrics.WebhookValidating).
+				WithAdmission(resourceLogger.WithName("validate"))
+		},
+	)
+	registerWebhookHandlers(
+		mux,
+		"VPOL",
+		config.ValidatingPolicyServicePath,
+		resourceHandlers.ValidatingPolicies,
+		func(handler handlers.AdmissionHandler) handlers.HttpHandler {
+			return handler.
+				WithFilter(configuration).
+				WithProtection(toggle.FromContext(ctx).ProtectManagedResources()).
+				WithDump(debugModeOpts.DumpPayload).
+				WithTopLevelGVK(discovery).
+				WithRoles(rbLister, crbLister).
+				WithMetrics(resourceLogger, metricsConfig.Config(), metrics.WebhookValidating).
+				WithAdmission(vpolLogger.WithName("validate"))
+		},
+	)
+	mux.HandlerFunc(
+		"POST",
+		config.PolicyMutatingWebhookServicePath,
+		handlerFunc("MUTATE", policyHandlers.Mutation, "").
+			WithDump(debugModeOpts.DumpPayload).
+			WithMetrics(policyLogger, metricsConfig.Config(), metrics.WebhookMutating).
+			WithAdmission(policyLogger.WithName("mutate")).
+			ToHandlerFunc("MUTATE"),
+	)
+	mux.HandlerFunc(
+		"POST",
+		config.PolicyValidatingWebhookServicePath,
+		handlerFunc("VALIDATE", policyHandlers.Validation, "").
+			WithDump(debugModeOpts.DumpPayload).
+			WithSubResourceFilter().
+			WithMetrics(policyLogger, metricsConfig.Config(), metrics.WebhookValidating).
+			WithAdmission(policyLogger.WithName("validate")).
+			ToHandlerFunc("VALIDATE"),
+	)
+	mux.HandlerFunc(
+		"POST",
+		config.ExceptionValidatingWebhookServicePath,
+		handlerFunc("VALIDATE", exceptionHandlers.Validation, "").
+			WithDump(debugModeOpts.DumpPayload).
+			WithSubResourceFilter().
+			WithMetrics(exceptionLogger, metricsConfig.Config(), metrics.WebhookValidating).
+			WithAdmission(exceptionLogger.WithName("validate")).
+			ToHandlerFunc("VALIDATE"),
+	)
+	mux.HandlerFunc(
+		"POST",
+		config.CELExceptionValidatingWebhookServicePath,
+		handlerFunc("VALIDATE", celExceptionHandlers.Validation, "").
+			WithDump(debugModeOpts.DumpPayload).
+			WithSubResourceFilter().
+			WithMetrics(celExceptionLogger, metricsConfig.Config(), metrics.WebhookValidating).
+			WithAdmission(celExceptionLogger.WithName("validate")).
+			ToHandlerFunc("VALIDATE"),
+	)
+	mux.HandlerFunc(
+		"POST",
+		config.GlobalContextValidatingWebhookServicePath,
+		handlerFunc("VALIDATE", globalContextHandlers.Validation, "").
+			WithDump(debugModeOpts.DumpPayload).
+			WithSubResourceFilter().
+			WithMetrics(globalContextLogger, metricsConfig.Config(), metrics.WebhookValidating).
+			WithAdmission(globalContextLogger.WithName("validate")).
+			ToHandlerFunc("VALIDATE"),
+	)
+	mux.HandlerFunc(
+		"POST",
+		config.VerifyMutatingWebhookServicePath,
+		handlers.FromAdmissionFunc("VERIFY", handlers.Verify).
+			WithAdmission(verifyLogger.WithName("mutate")).
+			ToHandlerFunc("VERIFY"),
+	)
 	mux.HandlerFunc("GET", config.LivenessServicePath, handlers.Probe(runtime.IsLive))
 	mux.HandlerFunc("GET", config.ReadinessServicePath, handlers.Probe(runtime.IsReady))
 	return &server{
 		server: &http.Server{
-			Addr: ":9443",
+			Addr: fmt.Sprintf(":%d", webhookServerPort),
 			TLSConfig: &tls.Config{
 				GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
 					certPem, keyPem, err := tlsProvider()
@@ -179,6 +193,15 @@ func NewServer(
 					return &pair, nil
 				},
 				MinVersion: tls.VersionTLS12,
+				CipherSuites: []uint16{
+					// AEADs w/ ECDHE
+					tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+					tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+					tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+					tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+					tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305,
+					tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305,
+				},
 			},
 			Handler:           mux,
 			ReadTimeout:       30 * time.Second,
@@ -191,21 +214,20 @@ func NewServer(
 		vwcClient:   vwcClient,
 		leaseClient: leaseClient,
 		runtime:     runtime,
-		cleanUp:     make(chan struct{}),
 	}
 }
 
-func (s *server) Run(stopCh <-chan struct{}) {
+func (s *server) Run() {
 	go func() {
-		logger.V(3).Info("started serving requests", "addr", s.server.Addr)
-		if err := s.server.ListenAndServeTLS("", ""); err != http.ErrServerClosed {
-			logger.Error(err, "failed to listen to requests")
+		if err := s.server.ListenAndServeTLS("", ""); err != nil {
+			logging.Error(err, "failed to start server")
 		}
 	}()
-	logger.Info("starting service")
 }
 
-func (s *server) Stop(ctx context.Context) {
+func (s *server) Stop() {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 	s.cleanup(ctx)
 	err := s.server.Shutdown(ctx)
 	if err != nil {
@@ -217,113 +239,72 @@ func (s *server) Stop(ctx context.Context) {
 	}
 }
 
-func (s *server) Cleanup() <-chan struct{} {
-	return s.cleanUp
-}
-
 func (s *server) cleanup(ctx context.Context) {
 	if s.runtime.IsGoingDown() {
 		deleteLease := func(name string) {
 			if err := s.leaseClient.Delete(ctx, name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
 				logger.Error(err, "failed to clean up lease", "name", name)
+			} else if err == nil {
+				logger.V(2).Info("successfully deleted leases", "label", kyverno.LabelWebhookManagedBy)
 			}
 		}
-		deleteVwc := func(name string) {
-			if err := s.vwcClient.Delete(ctx, name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
-				logger.Error(err, "failed to clean up validating webhook configuration", "name", name)
+		deleteVwc := func() {
+			if err := s.vwcClient.DeleteCollection(ctx, metav1.DeleteOptions{}, metav1.ListOptions{
+				LabelSelector: kyverno.LabelWebhookManagedBy,
+			}); err != nil && !apierrors.IsNotFound(err) {
+				logger.Error(err, "failed to clean up validating webhook configuration", "label", kyverno.LabelWebhookManagedBy)
+			} else if err == nil {
+				logger.V(2).Info("successfully deleted validating webhook configurations", "label", kyverno.LabelWebhookManagedBy)
 			}
 		}
-		deleteMwc := func(name string) {
-			if err := s.mwcClient.Delete(ctx, name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
-				logger.Error(err, "failed to clean up mutating webhook configuration", "name", name)
+		deleteMwc := func() {
+			if err := s.mwcClient.DeleteCollection(ctx, metav1.DeleteOptions{}, metav1.ListOptions{
+				LabelSelector: kyverno.LabelWebhookManagedBy,
+			}); err != nil && !apierrors.IsNotFound(err) {
+				logger.Error(err, "failed to clean up mutating webhook configuration", "label", kyverno.LabelWebhookManagedBy)
+			} else if err == nil {
+				logger.V(2).Info("successfully deleted mutating webhook configurations", "label", kyverno.LabelWebhookManagedBy)
 			}
 		}
 		deleteLease("kyvernopre-lock")
-		deleteVwc(config.ValidatingWebhookConfigurationName)
-		deleteVwc(config.PolicyValidatingWebhookConfigurationName)
-		deleteMwc(config.MutatingWebhookConfigurationName)
-		deleteMwc(config.PolicyMutatingWebhookConfigurationName)
-		deleteMwc(config.VerifyMutatingWebhookConfigurationName)
+		deleteLease("kyverno-health")
+		deleteVwc()
+		deleteMwc()
 	}
-	close(s.cleanUp)
-}
-
-func dumpPayload(logger logr.Logger, request *admissionv1.AdmissionRequest, response *admissionv1.AdmissionResponse) {
-	reqPayload, err := newAdmissionRequestPayload(request)
-	if err != nil {
-		logger.Error(err, "Failed to extract resources")
-	} else {
-		logger.Info("Logging admission request and response payload ", "AdmissionRequest", reqPayload, "AdmissionResponse", response)
-	}
-}
-
-func dump(inner handlers.AdmissionHandler, debugModeOpts DebugModeOptions) handlers.AdmissionHandler {
-	// debug mode not enabled, no need to add debug middleware
-	if !debugModeOpts.DumpPayload {
-		return inner
-	}
-	return func(logger logr.Logger, request *admissionv1.AdmissionRequest, startTime time.Time) *admissionv1.AdmissionResponse {
-		response := inner(logger, request, startTime)
-		dumpPayload(logger, request, response)
-		return response
-	}
-}
-
-func protect(inner handlers.AdmissionHandler) handlers.AdmissionHandler {
-	if !toggle.ProtectManagedResources.Enabled() {
-		return inner
-	}
-	return func(logger logr.Logger, request *admissionv1.AdmissionRequest, startTime time.Time) *admissionv1.AdmissionResponse {
-		newResource, oldResource, err := utils.ExtractResources(nil, request)
-		if err != nil {
-			logger.Error(err, "Failed to extract resources")
-			return admissionutils.ResponseFailure(err.Error())
-		}
-		for _, resource := range []unstructured.Unstructured{newResource, oldResource} {
-			resLabels := resource.GetLabels()
-			if resLabels[kyvernov1.LabelAppManagedBy] == kyvernov1.ValueKyvernoApp {
-				if request.UserInfo.Username != fmt.Sprintf("system:serviceaccount:%s:%s", config.KyvernoNamespace(), config.KyvernoServiceAccountName()) {
-					logger.Info("Access to the resource not authorized, this is a kyverno managed resource and should be altered only by kyverno")
-					return admissionutils.ResponseFailure("A kyverno managed resource can only be modified by kyverno")
-				}
-			}
-		}
-		return inner(logger, request, startTime)
-	}
-}
-
-func filter(configuration config.Configuration, inner handlers.AdmissionHandler) handlers.AdmissionHandler {
-	return handlers.Filter(configuration, inner)
-}
-
-func admission(logger logr.Logger, inner handlers.AdmissionHandler, debugModeOpts DebugModeOptions) http.HandlerFunc {
-	return handlers.Admission(logger, dump(protect(inner), debugModeOpts))
 }
 
 func registerWebhookHandlers(
-	logger logr.Logger,
 	mux *httprouter.Router,
+	name string,
 	basePath string,
-	configuration config.Configuration,
-	handlerFunc func(logr.Logger, *admissionv1.AdmissionRequest, string, time.Time) *admissionv1.AdmissionResponse,
-	debugModeOpts DebugModeOptions,
+	handler Handler,
+	builder func(handler handlers.AdmissionHandler) handlers.HttpHandler,
 ) {
-	mux.HandlerFunc("POST", basePath, admission(logger, filter(
-		configuration,
-		func(logger logr.Logger, request *admissionv1.AdmissionRequest, startTime time.Time) *admissionv1.AdmissionResponse {
-			return handlerFunc(logger, request, "all", startTime)
-		}), debugModeOpts),
-	)
-	mux.HandlerFunc("POST", basePath+"/fail", admission(logger, filter(
-		configuration,
-		func(logger logr.Logger, request *admissionv1.AdmissionRequest, startTime time.Time) *admissionv1.AdmissionResponse {
-			return handlerFunc(logger, request, "fail", startTime)
-		}), debugModeOpts),
-	)
-	mux.HandlerFunc("POST", basePath+"/ignore", admission(logger, filter(
-		configuration,
-		func(logger logr.Logger, request *admissionv1.AdmissionRequest, startTime time.Time) *admissionv1.AdmissionResponse {
-			return handlerFunc(logger, request, "ignore", startTime)
-		}), debugModeOpts),
+	ignore := handlerFunc(name, handler, "ignore")
+	fail := handlerFunc(name, handler, "fail")
+	mux.HandlerFunc("POST", basePath+"/ignore", builder(ignore).ToHandlerFunc(name))
+	mux.HandlerFunc("POST", basePath+"/fail", builder(fail).ToHandlerFunc(name))
+	mux.HandlerFunc("POST", basePath+"/ignore"+config.FineGrainedWebhookPath+"/*policy", builder(ignore).ToHandlerFunc(name))
+	mux.HandlerFunc("POST", basePath+"/fail"+config.FineGrainedWebhookPath+"/*policy", builder(fail).ToHandlerFunc(name))
+}
+
+func registerWebhookHandlersWithAll(
+	mux *httprouter.Router,
+	name string,
+	basePath string,
+	handler Handler,
+	builder func(handler handlers.AdmissionHandler) handlers.HttpHandler,
+) {
+	all := handlerFunc(name, handler, "all")
+	mux.HandlerFunc("POST", basePath, builder(all).ToHandlerFunc(name))
+	registerWebhookHandlers(mux, name, basePath, handler, builder)
+}
+
+func handlerFunc(name string, handler Handler, failurePolicy string) handlers.AdmissionHandler {
+	return handlers.FromAdmissionFunc(
+		name,
+		func(ctx context.Context, logger logr.Logger, request handlers.AdmissionRequest, startTime time.Time) admissionv1.AdmissionResponse {
+			return handler.Execute(ctx, logger, request, failurePolicy, startTime)
+		},
 	)
 }

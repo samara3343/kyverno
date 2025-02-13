@@ -1,14 +1,19 @@
 package auth
 
 import (
+	"context"
 	"fmt"
-	"reflect"
 
-	"github.com/kyverno/kyverno/pkg/clients/dclient"
-	authorizationv1 "k8s.io/api/authorization/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"github.com/kyverno/kyverno/pkg/auth/checker"
+	kubeutils "github.com/kyverno/kyverno/pkg/utils/kube"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	authorizationv1client "k8s.io/client-go/kubernetes/typed/authorization/v1"
 )
+
+// Discovery provides interface to mange Kind and GVR mapping
+type Discovery interface {
+	GetGVRFromGVK(schema.GroupVersionKind) (schema.GroupVersionResource, error)
+}
 
 // CanIOptions provides utility to check if user has authorization for the given operation
 type CanIOptions interface {
@@ -17,24 +22,32 @@ type CanIOptions interface {
 	// - can only evaluate a single verb
 	// - group version resource is determined from the kind using the discovery client REST mapper
 	// - If disallowed, the reason and evaluationError is available in the logs
-	// - each can generates a SelfSubjectAccessReview resource and response is evaluated for permissions
-	RunAccessCheck() (bool, error)
+	// - each can generates a SubjectAccessReview resource and response is evaluated for permissions
+	RunAccessCheck(context.Context) (bool, string, error)
 }
 
 type canIOptions struct {
-	namespace string
-	verb      string
-	kind      string
-	client    dclient.Interface
+	namespace   string
+	verb        string
+	gvk         string
+	subresource string
+	user        string
+	name        string
+	discovery   Discovery
+	checker     checker.AuthChecker
 }
 
 // NewCanI returns a new instance of operation access controller evaluator
-func NewCanI(client dclient.Interface, kind, namespace, verb string) CanIOptions {
+func NewCanI(discovery Discovery, sarClient authorizationv1client.SubjectAccessReviewInterface, gvk, namespace, name, verb, subresource string, user string) CanIOptions {
 	return &canIOptions{
-		namespace: namespace,
-		kind:      kind,
-		verb:      verb,
-		client:    client,
+		name:        name,
+		namespace:   namespace,
+		verb:        verb,
+		gvk:         gvk,
+		subresource: subresource,
+		user:        user,
+		discovery:   discovery,
+		checker:     checker.NewSubjectChecker(sarClient, user, nil),
 	}
 }
 
@@ -44,73 +57,30 @@ func NewCanI(client dclient.Interface, kind, namespace, verb string) CanIOptions
 // - group version resource is determined from the kind using the discovery client REST mapper
 // - If disallowed, the reason and evaluationError is available in the logs
 // - each can generates a SelfSubjectAccessReview resource and response is evaluated for permissions
-func (o *canIOptions) RunAccessCheck() (bool, error) {
+func (o *canIOptions) RunAccessCheck(ctx context.Context) (bool, string, error) {
 	// get GroupVersionResource from RESTMapper
 	// get GVR from kind
-	gvr, err := o.client.Discovery().GetGVRFromKind(o.kind)
+	apiVersion, kind := kubeutils.GetKindFromGVK(o.gvk)
+	gv, err := schema.ParseGroupVersion(apiVersion)
 	if err != nil {
-		return false, fmt.Errorf("failed to get GVR for kind %s", o.kind)
+		return false, "", fmt.Errorf("failed to parse group/version %s", apiVersion)
 	}
-
-	if reflect.DeepEqual(gvr, schema.GroupVersionResource{}) {
+	gvr, err := o.discovery.GetGVRFromGVK(gv.WithKind(kind))
+	if err != nil {
+		return false, "", fmt.Errorf("failed to get GVR for kind %s", o.gvk)
+	}
+	if gvr.Empty() {
 		// cannot find GVR
-		return false, fmt.Errorf("failed to get the Group Version Resource for kind %s", o.kind)
+		return false, "", fmt.Errorf("failed to get the Group Version Resource for kind %s", o.gvk)
 	}
-
-	sar := &authorizationv1.SelfSubjectAccessReview{
-		Spec: authorizationv1.SelfSubjectAccessReviewSpec{
-			ResourceAttributes: &authorizationv1.ResourceAttributes{
-				Namespace: o.namespace,
-				Verb:      o.verb,
-				Group:     gvr.Group,
-				Resource:  gvr.Resource,
-			},
-		},
-	}
-	// Set self subject access review
-	// - namespace
-	// - verb
-	// - resource
-	// - subresource
-	logger := logger.WithValues("kind", sar.Kind, "namespace", sar.Namespace, "name", sar.Name)
-
-	// Create the Resource
-	resp, err := o.client.CreateResource("", "SelfSubjectAccessReview", "", sar, false)
+	logger := logger.WithValues("kind", kind, "namespace", o.namespace, "gvr", gvr.String(), "verb", o.verb)
+	result, err := o.checker.Check(ctx, gvr.Group, gvr.Version, gvr.Resource, o.subresource, o.namespace, o.name, o.verb)
 	if err != nil {
-		logger.Error(err, "failed to create resource")
-		return false, err
+		logger.Error(err, "failed to check permissions")
+		return false, "", err
 	}
-
-	// status.allowed
-	allowed, ok, err := unstructured.NestedBool(resp.Object, "status", "allowed")
-	if !ok {
-		if err != nil {
-			logger.Error(err, "failed to get the field", "field", "status.allowed")
-		}
-		logger.Info("field not found", "field", "status.allowed")
+	if !result.Allowed {
+		logger.V(3).Info("disallowed operation", "reason", result.Reason, "evaluationError", result.EvaluationError)
 	}
-
-	if !allowed {
-		// status.reason
-		reason, ok, err := unstructured.NestedString(resp.Object, "status", "reason")
-		if !ok {
-			if err != nil {
-				logger.Error(err, "failed to get the field", "field", "status.reason")
-			}
-			logger.Info("field not found", "field", "status.reason")
-		}
-		// status.evaluationError
-		evaluationError, ok, err := unstructured.NestedString(resp.Object, "status", "evaluationError")
-		if !ok {
-			if err != nil {
-				logger.Error(err, "failed to get the field", "field", "status.evaluationError")
-			}
-			logger.Info("field not found", "field", "status.evaluationError")
-		}
-
-		// Reporting ? (just logs)
-		logger.Info("disallowed operation", "reason", reason, "evaluationError", evaluationError)
-	}
-
-	return allowed, nil
+	return result.Allowed, result.Reason, nil
 }

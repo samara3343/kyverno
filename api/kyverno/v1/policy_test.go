@@ -3,6 +3,7 @@ package v1
 import (
 	"testing"
 
+	"github.com/kyverno/kyverno/api/kyverno"
 	"gotest.tools/assert"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation/field"
@@ -18,8 +19,8 @@ func Test_Policy_Name(t *testing.T) {
 	assert.Assert(t, len(errs) == 1)
 	assert.Equal(t, errs[0].Field, "name")
 	assert.Equal(t, errs[0].Type, field.ErrorTypeTooLong)
-	assert.Equal(t, errs[0].Detail, "must have at most 63 bytes")
-	assert.Equal(t, errs[0].Error(), "name: Too long: must have at most 63 bytes")
+	assert.Equal(t, errs[0].Detail, "may not be more than 63 bytes")
+	assert.Equal(t, errs[0].Error(), "name: Too long: may not be more than 63 bytes")
 }
 
 func Test_Policy_IsNamespaced(t *testing.T) {
@@ -44,7 +45,7 @@ func Test_Policy_Autogen_All(t *testing.T) {
 			Name:      "policy",
 			Namespace: "abcd",
 			Annotations: map[string]string{
-				PodControllersAnnotation: "all",
+				kyverno.AnnotationAutogenControllers: "all",
 			},
 		},
 	}

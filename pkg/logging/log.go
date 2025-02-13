@@ -8,12 +8,12 @@ import (
 	stdlog "log"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/go-logr/logr"
-	"github.com/go-logr/zapr"
-	"go.uber.org/zap"
+	"github.com/go-logr/zerologr"
+	"github.com/rs/zerolog"
 	"k8s.io/klog/v2"
-	"k8s.io/klog/v2/klogr"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
@@ -24,16 +24,27 @@ const (
 	// Default logging mode is TextFormat.
 	TextFormat = "text"
 	// LogLevelController is the log level to use for controllers plumbing.
-	LogLevelController = 3
+	LogLevelController = 1
+	// LogLevelClient is the log level to use for clients.
+	LogLevelClient = 1
+	// time formats
+	DefaultTime = "default"
+	ISO8601     = "iso8601"
+	RFC3339     = "rfc3339"
+	MILLIS      = "millis"
+	NANOS       = "nanos"
+	EPOCH       = "epoch"
+	RFC3339NANO = "rfc3339nano"
 )
 
 // Initially, globalLog comes from controller-runtime/log with logger created earlier by controller-runtime.
 // When logging.Setup is called, globalLog is switched to the real logger.
 // Call depth of all loggers created before logging.Setup will not work, including package level loggers as they are created before main.
 // All loggers created after logging.Setup won't be subject to the call depth limitation and will work if the underlying sink supports it.
-var globalLog = log.Log
 
-func Init(flags *flag.FlagSet) {
+var globalLog = log.Log // returns a Null log sink if SetLogger is not called.
+
+func InitFlags(flags *flag.FlagSet) {
 	// clear flags initialized in static dependencies
 	if flag.CommandLine.Lookup("log_dir") != nil {
 		flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ExitOnError)
@@ -43,24 +54,44 @@ func Init(flags *flag.FlagSet) {
 
 // Setup configures the logger with the supplied log format.
 // It returns an error if the JSON logger could not be initialized or passed logFormat is not recognized.
-func Setup(logFormat string) error {
+func Setup(logFormat string, loggingTimestampFormat string, level int) error {
+	zerologr.SetMaxV(level)
+
+	var logger zerolog.Logger
 	switch logFormat {
 	case TextFormat:
-		// in text mode we use FormatSerialize format
-		globalLog = klogr.New()
+		output := zerolog.ConsoleWriter{Out: os.Stderr}
+		output.TimeFormat = resolveTimestampFormat(loggingTimestampFormat)
+		logger = zerolog.New(output).With().Timestamp().Caller().Logger()
 	case JSONFormat:
-		zapLog, err := zap.NewProduction()
-		if err != nil {
-			return err
-		}
-		klog.SetLogger(zapr.NewLogger(zapLog))
-		// in json mode we use FormatKlog format
-		globalLog = klog.NewKlogr()
+		logger = zerolog.New(os.Stderr).With().Timestamp().Logger()
 	default:
 		return errors.New("log format not recognized, pass `text` for text mode or `json` to enable JSON logging")
 	}
+
+	globalLog = zerologr.New(&logger)
+	klog.SetLogger(globalLog.WithName("klog"))
 	log.SetLogger(globalLog)
 	return nil
+}
+
+func resolveTimestampFormat(format string) string {
+	switch format {
+	case ISO8601:
+		return time.RFC3339
+	case RFC3339:
+		return time.RFC3339
+	case MILLIS:
+		return time.StampMilli
+	case NANOS:
+		return time.StampNano
+	case EPOCH:
+		return time.UnixDate
+	case RFC3339NANO:
+		return time.RFC3339Nano
+	default:
+		return time.RFC3339
+	}
 }
 
 // GlobalLogger returns a logr.Logger as configured in main.
@@ -71,6 +102,11 @@ func GlobalLogger() logr.Logger {
 // ControllerLogger returns a logr.Logger to be used by controllers.
 func ControllerLogger(name string) logr.Logger {
 	return globalLog.WithName(name).V(LogLevelController)
+}
+
+// ClientLogger returns a logr.Logger to be used by clients.
+func ClientLogger(name string) logr.Logger {
+	return globalLog.WithName(name).V(LogLevelClient)
 }
 
 // WithName returns a new logr.Logger instance with the specified name element added to the Logger's name.

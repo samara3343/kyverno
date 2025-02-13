@@ -6,7 +6,7 @@ import (
 	"strconv"
 
 	"github.com/go-logr/logr"
-	"github.com/kyverno/kyverno/pkg/engine/common"
+	"github.com/kyverno/kyverno/pkg/engine/pattern"
 	"github.com/kyverno/kyverno/pkg/engine/wildcards"
 	"github.com/kyverno/kyverno/pkg/logging"
 )
@@ -43,7 +43,7 @@ func validateResourceElement(log logr.Logger, resourceElement, patternElement, o
 			log.V(4).Info("Pattern and resource have different structures.", "path", path, "expected", fmt.Sprintf("%T", patternElement), "current", fmt.Sprintf("%T", resourceElement))
 			return path, fmt.Errorf("pattern and resource have different structures. Path: %s. Expected %T, found %T", path, patternElement, resourceElement)
 		}
-		return validateMap(log, typedResourceElement, typedPatternElement, originPattern, path)
+		return validateMap(typedResourceElement, typedPatternElement, originPattern, path)
 	// array
 	case []interface{}:
 		typedResourceElement, ok := resourceElement.([]interface{})
@@ -54,7 +54,7 @@ func validateResourceElement(log logr.Logger, resourceElement, patternElement, o
 		return validateArray(log, typedResourceElement, typedPatternElement, originPattern, path)
 	// elementary values
 	case string, float64, int, int64, bool, nil:
-		if !common.ValidateValueWithPattern(log, resourceElement, patternElement) {
+		if !pattern.Validate(log, resourceElement, patternElement) {
 			return path, fmt.Errorf("value '%v' does not match '%v' at path %s", resourceElement, patternElement, path)
 		}
 
@@ -67,7 +67,7 @@ func validateResourceElement(log logr.Logger, resourceElement, patternElement, o
 
 // If validateResourceElement detects map element inside resource and pattern trees, it goes to validateMap
 // For each element of the map we must detect the type again, so we pass these elements to validateResourceElement
-func validateMap(log logr.Logger, resourceMap, patternMap map[string]interface{}, origPattern interface{}, path string) (string, error) {
+func validateMap(resourceMap, patternMap map[string]interface{}, origPattern interface{}, path string) (string, error) {
 	patternMap = wildcards.ExpandInMetadata(patternMap, resourceMap)
 	sortedResourceKeys := list.New()
 	for k := range patternMap {

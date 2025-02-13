@@ -2,95 +2,84 @@ package common
 
 import (
 	"fmt"
-	"reflect"
 
 	"github.com/go-logr/logr"
 	kyvernov1 "github.com/kyverno/kyverno/api/kyverno/v1"
-	kyvernov1beta1 "github.com/kyverno/kyverno/api/kyverno/v1beta1"
+	kyvernov2 "github.com/kyverno/kyverno/api/kyverno/v2"
 	"github.com/kyverno/kyverno/pkg/clients/dclient"
 	"github.com/kyverno/kyverno/pkg/config"
 	"github.com/kyverno/kyverno/pkg/engine"
-	"github.com/kyverno/kyverno/pkg/engine/context"
-	utils "github.com/kyverno/kyverno/pkg/utils"
-	"github.com/pkg/errors"
+	"github.com/kyverno/kyverno/pkg/engine/jmespath"
+	admissionutils "github.com/kyverno/kyverno/pkg/utils/admission"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
-func NewBackgroundContext(dclient dclient.Interface, ur *kyvernov1beta1.UpdateRequest,
+func NewBackgroundContext(
+	logger logr.Logger,
+	dclient dclient.Interface,
+	urContext kyvernov2.UpdateRequestSpecContext,
 	policy kyvernov1.PolicyInterface,
 	trigger *unstructured.Unstructured,
 	cfg config.Configuration,
+	jp jmespath.Interface,
 	namespaceLabels map[string]string,
-	logger logr.Logger,
-) (*engine.PolicyContext, bool, error) {
-	ctx := context.NewContext()
+) (*engine.PolicyContext, error) {
 	var new, old unstructured.Unstructured
 	var err error
 
-	if ur.Spec.Context.AdmissionRequestInfo.AdmissionRequest != nil {
-		if err := ctx.AddRequest(ur.Spec.Context.AdmissionRequestInfo.AdmissionRequest); err != nil {
-			return nil, false, errors.Wrap(err, "failed to load request in context")
-		}
-
-		new, old, err = utils.ExtractResources(nil, ur.Spec.Context.AdmissionRequestInfo.AdmissionRequest)
+	if urContext.AdmissionRequestInfo.AdmissionRequest != nil {
+		new, old, err = admissionutils.ExtractResources(nil, *urContext.AdmissionRequestInfo.AdmissionRequest)
 		if err != nil {
-			return nil, false, errors.Wrap(err, "failed to load request in context")
+			return nil, fmt.Errorf("failed to load request in context: %w", err)
 		}
-
-		if !reflect.DeepEqual(new, unstructured.Unstructured{}) {
+		if new.Object != nil {
 			if !check(&new, trigger) {
-				err := fmt.Errorf("resources don't match")
-				return nil, false, errors.Wrapf(err, "resource %v", ur.Spec.Resource)
+				return nil, fmt.Errorf("resources don't match, want: %v/%v, got: %v/%v",
+					trigger.GetNamespace(), trigger.GetName(), new.GetNamespace(), new.GetName())
 			}
 		}
 	}
-
 	if trigger == nil {
 		trigger = &old
 	}
-
 	if trigger == nil {
-		return nil, false, errors.New("trigger resource does not exist")
+		return nil, fmt.Errorf("trigger resource does not exist")
 	}
 
-	err = ctx.AddResource(trigger.Object)
+	var policyContext *engine.PolicyContext
+	if urContext.AdmissionRequestInfo.AdmissionRequest == nil {
+		policyContext, err = engine.NewPolicyContext(
+			jp,
+			*trigger,
+			kyvernov1.AdmissionOperation(urContext.AdmissionRequestInfo.Operation),
+			&urContext.UserRequestInfo,
+			cfg,
+		)
+	} else {
+		policyContext, err = engine.NewPolicyContextFromAdmissionRequest(
+			jp,
+			*urContext.AdmissionRequestInfo.AdmissionRequest,
+			urContext.UserRequestInfo,
+			trigger.GroupVersionKind(),
+			cfg,
+		)
+	}
 	if err != nil {
-		return nil, false, errors.Wrap(err, "failed to load resource in context")
+		return nil, err
 	}
-
-	err = ctx.AddOldResource(old.Object)
-	if err != nil {
-		return nil, false, errors.Wrap(err, "failed to load resource in context")
+	policyContext = policyContext.
+		WithPolicy(policy).
+		WithNewResource(*trigger).
+		WithOldResource(old).
+		WithNamespaceLabels(namespaceLabels).
+		WithAdmissionOperation(false)
+	if err = policyContext.JSONContext().AddResource(trigger.Object); err != nil {
+		return nil, fmt.Errorf("failed to load resource in context: %w", err)
 	}
-
-	err = ctx.AddUserInfo(ur.Spec.Context.UserRequestInfo)
-	if err != nil {
-		return nil, false, errors.Wrapf(err, "failed to load SA in context")
+	if err = policyContext.JSONContext().AddOldResource(old.Object); err != nil {
+		return nil, fmt.Errorf("failed to load resource in context: %w", err)
 	}
-
-	err = ctx.AddServiceAccount(ur.Spec.Context.UserRequestInfo.AdmissionUserInfo.Username)
-	if err != nil {
-		return nil, false, errors.Wrapf(err, "failed to load UserInfo in context")
-	}
-
-	if err := ctx.AddImageInfos(trigger); err != nil {
-		logger.Error(err, "unable to add image info to variables context")
-	}
-
-	policyContext := &engine.PolicyContext{
-		NewResource:         *trigger,
-		OldResource:         old,
-		Policy:              policy,
-		AdmissionInfo:       ur.Spec.Context.UserRequestInfo,
-		ExcludeGroupRole:    cfg.GetExcludeGroupRole(),
-		ExcludeResourceFunc: cfg.ToFilter,
-		JSONContext:         ctx,
-		NamespaceLabels:     namespaceLabels,
-		Client:              dclient,
-		AdmissionOperation:  false,
-	}
-
-	return policyContext, false, nil
+	return policyContext, nil
 }
 
 func check(admissionRsc, existingRsc *unstructured.Unstructured) bool {

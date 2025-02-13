@@ -2,16 +2,18 @@ package leaderelection
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"sync/atomic"
 	"time"
 
 	"github.com/go-logr/logr"
-	"github.com/pkg/errors"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/leaderelection"
 	"k8s.io/client-go/tools/leaderelection/resourcelock"
 )
+
+const DefaultRetryPeriod = 2 * time.Second
 
 type Interface interface {
 	// Run is a blocking call that runs a leader election
@@ -46,7 +48,7 @@ type config struct {
 	log               logr.Logger
 }
 
-func New(log logr.Logger, name, namespace string, kubeClient kubernetes.Interface, id string, startWork func(context.Context), stopWork func()) (Interface, error) {
+func New(log logr.Logger, name, namespace string, kubeClient kubernetes.Interface, id string, retryPeriod time.Duration, startWork func(context.Context), stopWork func()) (Interface, error) {
 	lock, err := resourcelock.New(
 		resourcelock.LeasesResourceLock,
 		namespace,
@@ -58,7 +60,7 @@ func New(log logr.Logger, name, namespace string, kubeClient kubernetes.Interfac
 		},
 	)
 	if err != nil {
-		return nil, errors.Wrapf(err, "error initializing resource lock: %s/%s", namespace, name)
+		return nil, fmt.Errorf("error initializing resource lock: %s/%s: %w", namespace, name, err)
 	}
 	e := &config{
 		name:       name,
@@ -71,30 +73,30 @@ func New(log logr.Logger, name, namespace string, kubeClient kubernetes.Interfac
 	}
 	e.leaderElectionCfg = leaderelection.LeaderElectionConfig{
 		Lock:            e.lock,
-		ReleaseOnCancel: true,
-		LeaseDuration:   15 * time.Second,
-		RenewDeadline:   10 * time.Second,
-		RetryPeriod:     2 * time.Second,
+		ReleaseOnCancel: false,
+		LeaseDuration:   6 * retryPeriod,
+		RenewDeadline:   5 * retryPeriod,
+		RetryPeriod:     retryPeriod,
 		Callbacks: leaderelection.LeaderCallbacks{
 			OnStartedLeading: func(ctx context.Context) {
 				atomic.StoreInt64(&e.isLeader, 1)
-				e.log.Info("started leading")
+				e.log.V(2).Info("started leading")
 				if e.startWork != nil {
 					e.startWork(ctx)
 				}
 			},
 			OnStoppedLeading: func() {
 				atomic.StoreInt64(&e.isLeader, 0)
-				e.log.Info("leadership lost, stopped leading")
+				e.log.V(2).Info("leadership lost, stopped leading")
 				if e.stopWork != nil {
 					e.stopWork()
 				}
 			},
 			OnNewLeader: func(identity string) {
 				if identity == e.lock.Identity() {
-					e.log.Info("still leading")
+					e.log.V(4).Info("still leading")
 				} else {
-					e.log.Info("another instance has been elected as leader", "leader", identity)
+					e.log.V(2).Info("another instance has been elected as leader", "leader", identity)
 				}
 			},
 		},

@@ -6,13 +6,16 @@ import (
 
 	kyvernov1 "github.com/kyverno/kyverno/api/kyverno/v1"
 	"github.com/kyverno/kyverno/pkg/autogen"
+	kubeutils "github.com/kyverno/kyverno/pkg/utils/kube"
+	"github.com/stretchr/testify/require"
 	"gotest.tools/assert"
 	kubecache "k8s.io/client-go/tools/cache"
 )
 
-func setPolicy(store store, policy kyvernov1.PolicyInterface) {
+func setPolicy(t *testing.T, store store, policy kyvernov1.PolicyInterface, finder ResourceFinder) {
 	key, _ := kubecache.MetaNamespaceKeyFunc(policy)
-	store.set(key, policy)
+	err := store.set(key, policy, finder)
+	assert.NilError(t, err)
 }
 
 func unsetPolicy(store store, policy kyvernov1.PolicyInterface) {
@@ -23,56 +26,64 @@ func unsetPolicy(store store, policy kyvernov1.PolicyInterface) {
 func Test_All(t *testing.T) {
 	pCache := newPolicyCache()
 	policy := newPolicy(t)
+	finder := TestResourceFinder{}
 	//add
-	setPolicy(pCache, policy)
-	for _, rule := range autogen.ComputeRules(policy) {
+	setPolicy(t, pCache, policy, finder)
+	for _, rule := range autogen.Default.ComputeRules(policy, "") {
 		for _, kind := range rule.MatchResources.Kinds {
-
-			// get
-			mutate := pCache.get(Mutate, kind, "")
-			if len(mutate) != 1 {
-				t.Errorf("expected 1 mutate policy, found %v", len(mutate))
-			}
-
-			validateEnforce := pCache.get(ValidateEnforce, kind, "")
-			if len(validateEnforce) != 1 {
-				t.Errorf("expected 1 validate policy, found %v", len(validateEnforce))
-			}
-			generate := pCache.get(Generate, kind, "")
-			if len(generate) != 1 {
-				t.Errorf("expected 1 generate policy, found %v", len(generate))
+			group, version, kind, subresource := kubeutils.ParseKindSelector(kind)
+			gvrs, err := finder.FindResources(group, version, kind, subresource)
+			assert.NilError(t, err)
+			for gvr := range gvrs {
+				// get
+				mutate := pCache.get(Mutate, gvr.GroupVersionResource(), gvr.SubResource, "")
+				if len(mutate) != 1 {
+					t.Errorf("expected 1 mutate policy, found %v", len(mutate))
+				}
+				validateEnforce := pCache.get(ValidateEnforce, gvr.GroupVersionResource(), gvr.SubResource, "")
+				if len(validateEnforce) != 1 {
+					t.Errorf("expected 1 validate policy, found %v", len(validateEnforce))
+				}
+				generate := pCache.get(Generate, gvr.GroupVersionResource(), gvr.SubResource, "")
+				if len(generate) != 1 {
+					t.Errorf("expected 1 generate policy, found %v", len(generate))
+				}
 			}
 		}
 	}
 
 	// remove
 	unsetPolicy(pCache, policy)
-	kind := "pod"
-	validateEnforce := pCache.get(ValidateEnforce, kind, "")
+	validateEnforce := pCache.get(ValidateEnforce, podsGVRS.GroupVersionResource(), "", "")
 	assert.Assert(t, len(validateEnforce) == 0)
 }
 
 func Test_Add_Duplicate_Policy(t *testing.T) {
 	pCache := newPolicyCache()
 	policy := newPolicy(t)
-	setPolicy(pCache, policy)
-	setPolicy(pCache, policy)
-	setPolicy(pCache, policy)
-	for _, rule := range autogen.ComputeRules(policy) {
+	finder := TestResourceFinder{}
+	setPolicy(t, pCache, policy, finder)
+	setPolicy(t, pCache, policy, finder)
+	setPolicy(t, pCache, policy, finder)
+	for _, rule := range autogen.Default.ComputeRules(policy, "") {
 		for _, kind := range rule.MatchResources.Kinds {
+			group, version, kind, subresource := kubeutils.ParseKindSelector(kind)
+			gvrs, err := finder.FindResources(group, version, kind, subresource)
+			assert.NilError(t, err)
+			for gvr := range gvrs {
+				mutate := pCache.get(Mutate, gvr.GroupVersionResource(), gvr.SubResource, "")
+				if len(mutate) != 1 {
+					t.Errorf("expected 1 mutate policy, found %v", len(mutate))
+				}
 
-			mutate := pCache.get(Mutate, kind, "")
-			if len(mutate) != 1 {
-				t.Errorf("expected 1 mutate policy, found %v", len(mutate))
-			}
-
-			validateEnforce := pCache.get(ValidateEnforce, kind, "")
-			if len(validateEnforce) != 1 {
-				t.Errorf("expected 1 validate policy, found %v", len(validateEnforce))
-			}
-			generate := pCache.get(Generate, kind, "")
-			if len(generate) != 1 {
-				t.Errorf("expected 1 generate policy, found %v", len(generate))
+				validateEnforce := pCache.get(ValidateEnforce, gvr.GroupVersionResource(), gvr.SubResource, "")
+				if len(validateEnforce) != 1 {
+					t.Errorf("expected 1 validate policy, found %v", len(validateEnforce))
+				}
+				generate := pCache.get(Generate, gvr.GroupVersionResource(), gvr.SubResource, "")
+				if len(generate) != 1 {
+					t.Errorf("expected 1 generate policy, found %v", len(generate))
+				}
 			}
 		}
 	}
@@ -81,22 +92,27 @@ func Test_Add_Duplicate_Policy(t *testing.T) {
 func Test_Add_Validate_Audit(t *testing.T) {
 	pCache := newPolicyCache()
 	policy := newPolicy(t)
-	setPolicy(pCache, policy)
-	setPolicy(pCache, policy)
+	finder := TestResourceFinder{}
+	setPolicy(t, pCache, policy, finder)
+	setPolicy(t, pCache, policy, finder)
 	policy.Spec.ValidationFailureAction = "audit"
-	setPolicy(pCache, policy)
-	setPolicy(pCache, policy)
-	for _, rule := range autogen.ComputeRules(policy) {
+	setPolicy(t, pCache, policy, finder)
+	setPolicy(t, pCache, policy, finder)
+	for _, rule := range autogen.Default.ComputeRules(policy, "") {
 		for _, kind := range rule.MatchResources.Kinds {
+			group, version, kind, subresource := kubeutils.ParseKindSelector(kind)
+			gvrs, err := finder.FindResources(group, version, kind, subresource)
+			assert.NilError(t, err)
+			for gvr := range gvrs {
+				validateEnforce := pCache.get(ValidateEnforce, gvr.GroupVersionResource(), gvr.SubResource, "")
+				if len(validateEnforce) != 0 {
+					t.Errorf("expected 0 validate (enforce) policy, found %v", len(validateEnforce))
+				}
 
-			validateEnforce := pCache.get(ValidateEnforce, kind, "")
-			if len(validateEnforce) != 0 {
-				t.Errorf("expected 0 validate (enforce) policy, found %v", len(validateEnforce))
-			}
-
-			validateAudit := pCache.get(ValidateAudit, kind, "")
-			if len(validateAudit) != 1 {
-				t.Errorf("expected 1 validate (audit) policy, found %v", len(validateAudit))
+				validateAudit := pCache.get(ValidateAudit, gvr.GroupVersionResource(), gvr.SubResource, "")
+				if len(validateAudit) != 1 {
+					t.Errorf("expected 1 validate (audit) policy, found %v", len(validateAudit))
+				}
 			}
 		}
 	}
@@ -105,26 +121,22 @@ func Test_Add_Validate_Audit(t *testing.T) {
 func Test_Add_Remove(t *testing.T) {
 	pCache := newPolicyCache()
 	policy := newPolicy(t)
-	kind := "Pod"
-	setPolicy(pCache, policy)
-
-	validateEnforce := pCache.get(ValidateEnforce, kind, "")
+	finder := TestResourceFinder{}
+	setPolicy(t, pCache, policy, finder)
+	validateEnforce := pCache.get(ValidateEnforce, podsGVRS.GroupVersionResource(), "", "")
 	if len(validateEnforce) != 1 {
 		t.Errorf("expected 1 validate enforce policy, found %v", len(validateEnforce))
 	}
-
-	mutate := pCache.get(Mutate, kind, "")
+	mutate := pCache.get(Mutate, podsGVRS.GroupVersionResource(), "", "")
 	if len(mutate) != 1 {
 		t.Errorf("expected 1 mutate policy, found %v", len(mutate))
 	}
-
-	generate := pCache.get(Generate, kind, "")
+	generate := pCache.get(Generate, podsGVRS.GroupVersionResource(), "", "")
 	if len(generate) != 1 {
 		t.Errorf("expected 1 generate policy, found %v", len(generate))
 	}
-
 	unsetPolicy(pCache, policy)
-	deletedValidateEnforce := pCache.get(ValidateEnforce, kind, "")
+	deletedValidateEnforce := pCache.get(ValidateEnforce, podsGVRS.GroupVersionResource(), "", "")
 	if len(deletedValidateEnforce) != 0 {
 		t.Errorf("expected 0 validate enforce policy, found %v", len(deletedValidateEnforce))
 	}
@@ -133,26 +145,22 @@ func Test_Add_Remove(t *testing.T) {
 func Test_Add_Remove_Any(t *testing.T) {
 	pCache := newPolicyCache()
 	policy := newAnyPolicy(t)
-	kind := "Pod"
-	setPolicy(pCache, policy)
-
-	validateEnforce := pCache.get(ValidateEnforce, kind, "")
+	finder := TestResourceFinder{}
+	setPolicy(t, pCache, policy, finder)
+	validateEnforce := pCache.get(ValidateEnforce, podsGVRS.GroupVersionResource(), "", "")
 	if len(validateEnforce) != 1 {
 		t.Errorf("expected 1 validate enforce policy, found %v", len(validateEnforce))
 	}
-
-	mutate := pCache.get(Mutate, kind, "")
+	mutate := pCache.get(Mutate, podsGVRS.GroupVersionResource(), "", "")
 	if len(mutate) != 1 {
 		t.Errorf("expected 1 mutate policy, found %v", len(mutate))
 	}
-
-	generate := pCache.get(Generate, kind, "")
+	generate := pCache.get(Generate, podsGVRS.GroupVersionResource(), "", "")
 	if len(generate) != 1 {
 		t.Errorf("expected 1 generate policy, found %v", len(generate))
 	}
-
 	unsetPolicy(pCache, policy)
-	deletedValidateEnforce := pCache.get(ValidateEnforce, kind, "")
+	deletedValidateEnforce := pCache.get(ValidateEnforce, podsGVRS.GroupVersionResource(), "", "")
 	if len(deletedValidateEnforce) != 0 {
 		t.Errorf("expected 0 validate enforce policy, found %v", len(deletedValidateEnforce))
 	}
@@ -161,7 +169,6 @@ func Test_Add_Remove_Any(t *testing.T) {
 func Test_Remove_From_Empty_Cache(t *testing.T) {
 	pCache := newPolicyCache()
 	policy := newPolicy(t)
-
 	unsetPolicy(pCache, policy)
 }
 
@@ -266,11 +273,9 @@ func newPolicy(t *testing.T) *kyvernov1.ClusterPolicy {
 		  ]
 		}
 	  }`)
-
 	var policy *kyvernov1.ClusterPolicy
 	err := json.Unmarshal(rawPolicy, &policy)
 	assert.NilError(t, err)
-
 	return policy
 }
 
@@ -439,11 +444,9 @@ func newAnyPolicy(t *testing.T) *kyvernov1.ClusterPolicy {
 			]
 		}
 	}`)
-
 	var policy *kyvernov1.ClusterPolicy
 	err := json.Unmarshal(rawPolicy, &policy)
 	assert.NilError(t, err)
-
 	return policy
 }
 
@@ -475,7 +478,7 @@ func newNsPolicy(t *testing.T) kyvernov1.PolicyInterface {
 							"value": "a"
 						}
 					]
-				  } 
+				  }
 				}
 			  }
 			},
@@ -546,11 +549,9 @@ func newNsPolicy(t *testing.T) kyvernov1.PolicyInterface {
 		  ]
 		}
 	  }`)
-
 	var policy *kyvernov1.Policy
 	err := json.Unmarshal(rawPolicy, &policy)
 	assert.NilError(t, err)
-
 	return policy
 }
 
@@ -603,11 +604,9 @@ func newGVKPolicy(t *testing.T) *kyvernov1.ClusterPolicy {
 		   ]
 		}
 	 }`)
-
 	var policy *kyvernov1.ClusterPolicy
 	err := json.Unmarshal(rawPolicy, &policy)
 	assert.NilError(t, err)
-
 	return policy
 }
 
@@ -645,11 +644,9 @@ func newUserTestPolicy(t *testing.T) kyvernov1.PolicyInterface {
 		   ]
 		}
 	 }`)
-
 	var policy *kyvernov1.Policy
 	err := json.Unmarshal(rawPolicy, &policy)
 	assert.NilError(t, err)
-
 	return policy
 }
 
@@ -694,13 +691,12 @@ func newGeneratePolicy(t *testing.T) *kyvernov1.ClusterPolicy {
 		   ]
 		}
 	 }`)
-
 	var policy *kyvernov1.ClusterPolicy
 	err := json.Unmarshal(rawPolicy, &policy)
 	assert.NilError(t, err)
-
 	return policy
 }
+
 func newMutatePolicy(t *testing.T) *kyvernov1.ClusterPolicy {
 	rawPolicy := []byte(`{
 		"metadata": {
@@ -738,13 +734,12 @@ func newMutatePolicy(t *testing.T) *kyvernov1.ClusterPolicy {
 		  "validationFailureAction": "audit"
 		}
 	  }`)
-
 	var policy *kyvernov1.ClusterPolicy
 	err := json.Unmarshal(rawPolicy, &policy)
 	assert.NilError(t, err)
-
 	return policy
 }
+
 func newNsMutatePolicy(t *testing.T) kyvernov1.PolicyInterface {
 	rawPolicy := []byte(`{
 		"metadata": {
@@ -783,11 +778,9 @@ func newNsMutatePolicy(t *testing.T) kyvernov1.PolicyInterface {
 		  "validationFailureAction": "audit"
 		}
 	  }`)
-
 	var policy *kyvernov1.Policy
 	err := json.Unmarshal(rawPolicy, &policy)
 	assert.NilError(t, err)
-
 	return policy
 }
 
@@ -837,11 +830,9 @@ func newValidateAuditPolicy(t *testing.T) *kyvernov1.ClusterPolicy {
 			]
 		}
 	  }`)
-
 	var policy *kyvernov1.ClusterPolicy
 	err := json.Unmarshal(rawPolicy, &policy)
 	assert.NilError(t, err)
-
 	return policy
 }
 
@@ -891,68 +882,74 @@ func newValidateEnforcePolicy(t *testing.T) *kyvernov1.ClusterPolicy {
 			]
 		}
 	  }`)
-
 	var policy *kyvernov1.ClusterPolicy
 	err := json.Unmarshal(rawPolicy, &policy)
 	assert.NilError(t, err)
-
 	return policy
 }
 
 func Test_Ns_All(t *testing.T) {
 	pCache := newPolicyCache()
 	policy := newNsPolicy(t)
+	finder := TestResourceFinder{}
 	//add
-	setPolicy(pCache, policy)
+	setPolicy(t, pCache, policy, finder)
 	nspace := policy.GetNamespace()
-	for _, rule := range autogen.ComputeRules(policy) {
+	rules := autogen.Default.ComputeRules(policy, "")
+	for _, rule := range rules {
 		for _, kind := range rule.MatchResources.Kinds {
-
-			// get
-			mutate := pCache.get(Mutate, kind, nspace)
-			if len(mutate) != 1 {
-				t.Errorf("expected 1 mutate policy, found %v", len(mutate))
-			}
-
-			validateEnforce := pCache.get(ValidateEnforce, kind, nspace)
-			if len(validateEnforce) != 1 {
-				t.Errorf("expected 1 validate policy, found %v", len(validateEnforce))
-			}
-			generate := pCache.get(Generate, kind, nspace)
-			if len(generate) != 1 {
-				t.Errorf("expected 1 generate policy, found %v", len(generate))
+			group, version, kind, subresource := kubeutils.ParseKindSelector(kind)
+			gvrs, err := finder.FindResources(group, version, kind, subresource)
+			assert.NilError(t, err)
+			for gvr := range gvrs {
+				// get
+				mutate := pCache.get(Mutate, gvr.GroupVersionResource(), gvr.SubResource, nspace)
+				if len(mutate) != 1 {
+					t.Errorf("expected 1 mutate policy, found %v", len(mutate))
+				}
+				validateEnforce := pCache.get(ValidateEnforce, gvr.GroupVersionResource(), gvr.SubResource, nspace)
+				if len(validateEnforce) != 1 {
+					t.Errorf("expected 1 validate policy, found %v", len(validateEnforce))
+				}
+				generate := pCache.get(Generate, gvr.GroupVersionResource(), gvr.SubResource, nspace)
+				if len(generate) != 1 {
+					t.Errorf("expected 1 generate policy, found %v", len(generate))
+				}
 			}
 		}
 	}
 	// remove
 	unsetPolicy(pCache, policy)
-	kind := "pod"
-	validateEnforce := pCache.get(ValidateEnforce, kind, nspace)
+	validateEnforce := pCache.get(ValidateEnforce, podsGVRS.GroupVersionResource(), "", nspace)
 	assert.Assert(t, len(validateEnforce) == 0)
 }
 
 func Test_Ns_Add_Duplicate_Policy(t *testing.T) {
 	pCache := newPolicyCache()
 	policy := newNsPolicy(t)
-	setPolicy(pCache, policy)
-	setPolicy(pCache, policy)
-	setPolicy(pCache, policy)
+	finder := TestResourceFinder{}
+	setPolicy(t, pCache, policy, finder)
+	setPolicy(t, pCache, policy, finder)
+	setPolicy(t, pCache, policy, finder)
 	nspace := policy.GetNamespace()
-	for _, rule := range autogen.ComputeRules(policy) {
+	for _, rule := range autogen.Default.ComputeRules(policy, "") {
 		for _, kind := range rule.MatchResources.Kinds {
-
-			mutate := pCache.get(Mutate, kind, nspace)
-			if len(mutate) != 1 {
-				t.Errorf("expected 1 mutate policy, found %v", len(mutate))
-			}
-
-			validateEnforce := pCache.get(ValidateEnforce, kind, nspace)
-			if len(validateEnforce) != 1 {
-				t.Errorf("expected 1 validate policy, found %v", len(validateEnforce))
-			}
-			generate := pCache.get(Generate, kind, nspace)
-			if len(generate) != 1 {
-				t.Errorf("expected 1 generate policy, found %v", len(generate))
+			group, version, kind, subresource := kubeutils.ParseKindSelector(kind)
+			gvrs, err := finder.FindResources(group, version, kind, subresource)
+			assert.NilError(t, err)
+			for gvr := range gvrs {
+				mutate := pCache.get(Mutate, gvr.GroupVersionResource(), gvr.SubResource, nspace)
+				if len(mutate) != 1 {
+					t.Errorf("expected 1 mutate policy, found %v", len(mutate))
+				}
+				validateEnforce := pCache.get(ValidateEnforce, gvr.GroupVersionResource(), gvr.SubResource, nspace)
+				if len(validateEnforce) != 1 {
+					t.Errorf("expected 1 validate policy, found %v", len(validateEnforce))
+				}
+				generate := pCache.get(Generate, gvr.GroupVersionResource(), gvr.SubResource, nspace)
+				if len(generate) != 1 {
+					t.Errorf("expected 1 generate policy, found %v", len(generate))
+				}
 			}
 		}
 	}
@@ -961,23 +958,28 @@ func Test_Ns_Add_Duplicate_Policy(t *testing.T) {
 func Test_Ns_Add_Validate_Audit(t *testing.T) {
 	pCache := newPolicyCache()
 	policy := newNsPolicy(t)
-	setPolicy(pCache, policy)
-	setPolicy(pCache, policy)
+	finder := TestResourceFinder{}
+	setPolicy(t, pCache, policy, finder)
+	setPolicy(t, pCache, policy, finder)
 	nspace := policy.GetNamespace()
 	policy.GetSpec().ValidationFailureAction = "audit"
-	setPolicy(pCache, policy)
-	setPolicy(pCache, policy)
-	for _, rule := range autogen.ComputeRules(policy) {
+	setPolicy(t, pCache, policy, finder)
+	setPolicy(t, pCache, policy, finder)
+	for _, rule := range autogen.Default.ComputeRules(policy, "") {
 		for _, kind := range rule.MatchResources.Kinds {
+			group, version, kind, subresource := kubeutils.ParseKindSelector(kind)
+			gvrs, err := finder.FindResources(group, version, kind, subresource)
+			assert.NilError(t, err)
+			for gvr := range gvrs {
+				validateEnforce := pCache.get(ValidateEnforce, gvr.GroupVersionResource(), gvr.SubResource, nspace)
+				if len(validateEnforce) != 0 {
+					t.Errorf("expected 0 validate (enforce) policy, found %v", len(validateEnforce))
+				}
 
-			validateEnforce := pCache.get(ValidateEnforce, kind, nspace)
-			if len(validateEnforce) != 0 {
-				t.Errorf("expected 0 validate (enforce) policy, found %v", len(validateEnforce))
-			}
-
-			validateAudit := pCache.get(ValidateAudit, kind, nspace)
-			if len(validateAudit) != 1 {
-				t.Errorf("expected 1 validate (audit) policy, found %v", len(validateAudit))
+				validateAudit := pCache.get(ValidateAudit, gvr.GroupVersionResource(), gvr.SubResource, nspace)
+				if len(validateAudit) != 1 {
+					t.Errorf("expected 1 validate (audit) policy, found %v", len(validateAudit))
+				}
 			}
 		}
 	}
@@ -986,16 +988,15 @@ func Test_Ns_Add_Validate_Audit(t *testing.T) {
 func Test_Ns_Add_Remove(t *testing.T) {
 	pCache := newPolicyCache()
 	policy := newNsPolicy(t)
+	finder := TestResourceFinder{}
 	nspace := policy.GetNamespace()
-	kind := "Pod"
-	setPolicy(pCache, policy)
-	validateEnforce := pCache.get(ValidateEnforce, kind, nspace)
+	setPolicy(t, pCache, policy, finder)
+	validateEnforce := pCache.get(ValidateEnforce, podsGVRS.GroupVersionResource(), "", nspace)
 	if len(validateEnforce) != 1 {
 		t.Errorf("expected 1 validate enforce policy, found %v", len(validateEnforce))
 	}
-
 	unsetPolicy(pCache, policy)
-	deletedValidateEnforce := pCache.get(ValidateEnforce, kind, nspace)
+	deletedValidateEnforce := pCache.get(ValidateEnforce, podsGVRS.GroupVersionResource(), "", nspace)
 	if len(deletedValidateEnforce) != 0 {
 		t.Errorf("expected 0 validate enforce policy, found %v", len(deletedValidateEnforce))
 	}
@@ -1004,14 +1005,19 @@ func Test_Ns_Add_Remove(t *testing.T) {
 func Test_GVk_Cache(t *testing.T) {
 	pCache := newPolicyCache()
 	policy := newGVKPolicy(t)
+	finder := TestResourceFinder{}
 	//add
-	setPolicy(pCache, policy)
-	for _, rule := range autogen.ComputeRules(policy) {
+	setPolicy(t, pCache, policy, finder)
+	for _, rule := range autogen.Default.ComputeRules(policy, "") {
 		for _, kind := range rule.MatchResources.Kinds {
-
-			generate := pCache.get(Generate, kind, "")
-			if len(generate) != 1 {
-				t.Errorf("expected 1 generate policy, found %v", len(generate))
+			group, version, kind, subresource := kubeutils.ParseKindSelector(kind)
+			gvrs, err := finder.FindResources(group, version, kind, subresource)
+			assert.NilError(t, err)
+			for gvr := range gvrs {
+				generate := pCache.get(Generate, gvr.GroupVersionResource(), gvr.SubResource, "")
+				if len(generate) != 1 {
+					t.Errorf("expected 1 generate policy, found %v", len(generate))
+				}
 			}
 		}
 	}
@@ -1020,15 +1026,14 @@ func Test_GVk_Cache(t *testing.T) {
 func Test_GVK_Add_Remove(t *testing.T) {
 	pCache := newPolicyCache()
 	policy := newGVKPolicy(t)
-	kind := "ClusterRole"
-	setPolicy(pCache, policy)
-	generate := pCache.get(Generate, kind, "")
+	finder := TestResourceFinder{}
+	setPolicy(t, pCache, policy, finder)
+	generate := pCache.get(Generate, clusterrolesGVRS.GroupVersionResource(), "", "")
 	if len(generate) != 1 {
 		t.Errorf("expected 1 generate policy, found %v", len(generate))
 	}
-
 	unsetPolicy(pCache, policy)
-	deletedGenerate := pCache.get(Generate, kind, "")
+	deletedGenerate := pCache.get(Generate, clusterrolesGVRS.GroupVersionResource(), "", "")
 	if len(deletedGenerate) != 0 {
 		t.Errorf("expected 0 generate policy, found %v", len(deletedGenerate))
 	}
@@ -1038,13 +1043,19 @@ func Test_Add_Validate_Enforce(t *testing.T) {
 	pCache := newPolicyCache()
 	policy := newUserTestPolicy(t)
 	nspace := policy.GetNamespace()
+	finder := TestResourceFinder{}
 	//add
-	setPolicy(pCache, policy)
-	for _, rule := range autogen.ComputeRules(policy) {
+	setPolicy(t, pCache, policy, finder)
+	for _, rule := range autogen.Default.ComputeRules(policy, "") {
 		for _, kind := range rule.MatchResources.Kinds {
-			validateEnforce := pCache.get(ValidateEnforce, kind, nspace)
-			if len(validateEnforce) != 1 {
-				t.Errorf("expected 1 validate policy, found %v", len(validateEnforce))
+			group, version, kind, subresource := kubeutils.ParseKindSelector(kind)
+			gvrs, err := finder.FindResources(group, version, kind, subresource)
+			assert.NilError(t, err)
+			for gvr := range gvrs {
+				validateEnforce := pCache.get(ValidateEnforce, gvr.GroupVersionResource(), gvr.SubResource, nspace)
+				if len(validateEnforce) != 1 {
+					t.Errorf("expected 1 validate policy, found %v", len(validateEnforce))
+				}
 			}
 		}
 	}
@@ -1054,15 +1065,15 @@ func Test_Ns_Add_Remove_User(t *testing.T) {
 	pCache := newPolicyCache()
 	policy := newUserTestPolicy(t)
 	nspace := policy.GetNamespace()
-	kind := "Deployment"
-	setPolicy(pCache, policy)
-	validateEnforce := pCache.get(ValidateEnforce, kind, nspace)
+	finder := TestResourceFinder{}
+	// kind := "Deployment"
+	setPolicy(t, pCache, policy, finder)
+	validateEnforce := pCache.get(ValidateEnforce, deploymentsGVRS.GroupVersionResource(), "", nspace)
 	if len(validateEnforce) != 1 {
 		t.Errorf("expected 1 validate enforce policy, found %v", len(validateEnforce))
 	}
-
 	unsetPolicy(pCache, policy)
-	deletedValidateEnforce := pCache.get(ValidateEnforce, kind, nspace)
+	deletedValidateEnforce := pCache.get(ValidateEnforce, deploymentsGVRS.GroupVersionResource(), "", nspace)
 	if len(deletedValidateEnforce) != 0 {
 		t.Errorf("expected 0 validate enforce policy, found %v", len(deletedValidateEnforce))
 	}
@@ -1071,17 +1082,22 @@ func Test_Ns_Add_Remove_User(t *testing.T) {
 func Test_Mutate_Policy(t *testing.T) {
 	pCache := newPolicyCache()
 	policy := newMutatePolicy(t)
+	finder := TestResourceFinder{}
 	//add
-	setPolicy(pCache, policy)
-	setPolicy(pCache, policy)
-	setPolicy(pCache, policy)
-	for _, rule := range autogen.ComputeRules(policy) {
+	setPolicy(t, pCache, policy, finder)
+	setPolicy(t, pCache, policy, finder)
+	setPolicy(t, pCache, policy, finder)
+	for _, rule := range autogen.Default.ComputeRules(policy, "") {
 		for _, kind := range rule.MatchResources.Kinds {
-
-			// get
-			mutate := pCache.get(Mutate, kind, "")
-			if len(mutate) != 1 {
-				t.Errorf("expected 1 mutate policy, found %v", len(mutate))
+			group, version, kind, subresource := kubeutils.ParseKindSelector(kind)
+			gvrs, err := finder.FindResources(group, version, kind, subresource)
+			assert.NilError(t, err)
+			for gvr := range gvrs {
+				// get
+				mutate := pCache.get(Mutate, gvr.GroupVersionResource(), gvr.SubResource, "")
+				if len(mutate) != 1 {
+					t.Errorf("expected 1 mutate policy, found %v", len(mutate))
+				}
 			}
 		}
 	}
@@ -1090,15 +1106,20 @@ func Test_Mutate_Policy(t *testing.T) {
 func Test_Generate_Policy(t *testing.T) {
 	pCache := newPolicyCache()
 	policy := newGeneratePolicy(t)
+	finder := TestResourceFinder{}
 	//add
-	setPolicy(pCache, policy)
-	for _, rule := range autogen.ComputeRules(policy) {
+	setPolicy(t, pCache, policy, finder)
+	for _, rule := range autogen.Default.ComputeRules(policy, "") {
 		for _, kind := range rule.MatchResources.Kinds {
-
-			// get
-			generate := pCache.get(Generate, kind, "")
-			if len(generate) != 1 {
-				t.Errorf("expected 1 generate policy, found %v", len(generate))
+			group, version, kind, subresource := kubeutils.ParseKindSelector(kind)
+			gvrs, err := finder.FindResources(group, version, kind, subresource)
+			assert.NilError(t, err)
+			for gvr := range gvrs {
+				// get
+				generate := pCache.get(Generate, gvr.GroupVersionResource(), gvr.SubResource, "")
+				if len(generate) != 1 {
+					t.Errorf("expected 1 generate policy, found %v", len(generate))
+				}
 			}
 		}
 	}
@@ -1108,53 +1129,47 @@ func Test_NsMutate_Policy(t *testing.T) {
 	pCache := newPolicyCache()
 	policy := newMutatePolicy(t)
 	nspolicy := newNsMutatePolicy(t)
+	finder := TestResourceFinder{}
 	//add
-	setPolicy(pCache, policy)
-	setPolicy(pCache, nspolicy)
-	setPolicy(pCache, policy)
-	setPolicy(pCache, nspolicy)
-
+	setPolicy(t, pCache, policy, finder)
+	setPolicy(t, pCache, nspolicy, finder)
+	setPolicy(t, pCache, policy, finder)
+	setPolicy(t, pCache, nspolicy, finder)
 	nspace := policy.GetNamespace()
 	// get
-	mutate := pCache.get(Mutate, "StatefulSet", "")
+	mutate := pCache.get(Mutate, statefulsetsGVRS.GroupVersionResource(), "", "")
 	if len(mutate) != 1 {
 		t.Errorf("expected 1 mutate policy, found %v", len(mutate))
 	}
-
 	// get
-	nsMutate := pCache.get(Mutate, "StatefulSet", nspace)
+	nsMutate := pCache.get(Mutate, statefulsetsGVRS.GroupVersionResource(), "", nspace)
 	if len(nsMutate) != 1 {
 		t.Errorf("expected 1 namespace mutate policy, found %v", len(nsMutate))
 	}
-
 }
 
 func Test_Validate_Enforce_Policy(t *testing.T) {
 	pCache := newPolicyCache()
 	policy1 := newValidateAuditPolicy(t)
 	policy2 := newValidateEnforcePolicy(t)
-	setPolicy(pCache, policy1)
-	setPolicy(pCache, policy2)
-
-	validateEnforce := pCache.get(ValidateEnforce, "Pod", "")
+	finder := TestResourceFinder{}
+	setPolicy(t, pCache, policy1, finder)
+	setPolicy(t, pCache, policy2, finder)
+	validateEnforce := pCache.get(ValidateEnforce, podsGVRS.GroupVersionResource(), "", "")
 	if len(validateEnforce) != 2 {
 		t.Errorf("adding: expected 2 validate enforce policy, found %v", len(validateEnforce))
 	}
-
-	validateAudit := pCache.get(ValidateAudit, "Pod", "")
+	validateAudit := pCache.get(ValidateAudit, podsGVRS.GroupVersionResource(), "", "")
 	if len(validateAudit) != 0 {
 		t.Errorf("adding: expected 0 validate audit policy, found %v", len(validateAudit))
 	}
-
 	unsetPolicy(pCache, policy1)
 	unsetPolicy(pCache, policy2)
-
-	validateEnforce = pCache.get(ValidateEnforce, "Pod", "")
+	validateEnforce = pCache.get(ValidateEnforce, podsGVRS.GroupVersionResource(), "", "")
 	if len(validateEnforce) != 0 {
 		t.Errorf("removing: expected 0 validate enforce policy, found %v", len(validateEnforce))
 	}
-
-	validateAudit = pCache.get(ValidateAudit, "Pod", "")
+	validateAudit = pCache.get(ValidateAudit, podsGVRS.GroupVersionResource(), "", "")
 	if len(validateAudit) != 0 {
 		t.Errorf("removing: expected 0 validate audit policy, found %v", len(validateAudit))
 	}
@@ -1163,101 +1178,90 @@ func Test_Validate_Enforce_Policy(t *testing.T) {
 func Test_Get_Policies(t *testing.T) {
 	cache := NewCache()
 	policy := newPolicy(t)
+	finder := TestResourceFinder{}
 	key, _ := kubecache.MetaNamespaceKeyFunc(policy)
-	cache.Set(key, policy)
-
-	validateAudit := cache.GetPolicies(ValidateAudit, "Namespace", "")
+	cache.Set(key, policy, finder)
+	validateAudit := cache.GetPolicies(ValidateAudit, namespacesGVRS.GroupVersionResource(), "", "")
 	if len(validateAudit) != 0 {
 		t.Errorf("expected 0 validate audit policy, found %v", len(validateAudit))
 	}
-
-	validateAudit = cache.GetPolicies(ValidateAudit, "Pod", "test")
+	validateAudit = cache.GetPolicies(ValidateAudit, podsGVRS.GroupVersionResource(), "", "test")
 	if len(validateAudit) != 0 {
 		t.Errorf("expected 0 validate audit policy, found %v", len(validateAudit))
 	}
-
-	validateEnforce := cache.GetPolicies(ValidateEnforce, "Namespace", "")
+	validateEnforce := cache.GetPolicies(ValidateEnforce, namespacesGVRS.GroupVersionResource(), "", "")
 	if len(validateEnforce) != 1 {
 		t.Errorf("expected 1 validate enforce policy, found %v", len(validateEnforce))
 	}
-
-	mutate := cache.GetPolicies(Mutate, "Pod", "")
+	mutate := cache.GetPolicies(Mutate, podsGVRS.GroupVersionResource(), "", "")
 	if len(mutate) != 1 {
 		t.Errorf("expected 1 mutate policy, found %v", len(mutate))
 	}
-
-	generate := cache.GetPolicies(Generate, "Pod", "")
+	generate := cache.GetPolicies(Generate, podsGVRS.GroupVersionResource(), "", "")
 	if len(generate) != 1 {
 		t.Errorf("expected 1 generate policy, found %v", len(generate))
 	}
-
 }
 
 func Test_Get_Policies_Ns(t *testing.T) {
 	cache := NewCache()
 	policy := newNsPolicy(t)
+	finder := TestResourceFinder{}
 	key, _ := kubecache.MetaNamespaceKeyFunc(policy)
-	cache.Set(key, policy)
+	cache.Set(key, policy, finder)
 	nspace := policy.GetNamespace()
-
-	validateAudit := cache.GetPolicies(ValidateAudit, "Pod", nspace)
+	validateAudit := cache.GetPolicies(ValidateAudit, podsGVRS.GroupVersionResource(), "", nspace)
 	if len(validateAudit) != 0 {
 		t.Errorf("expected 0 validate audit policy, found %v", len(validateAudit))
 	}
-
-	validateEnforce := cache.GetPolicies(ValidateEnforce, "Pod", nspace)
+	validateEnforce := cache.GetPolicies(ValidateEnforce, podsGVRS.GroupVersionResource(), "", nspace)
 	if len(validateEnforce) != 1 {
 		t.Errorf("expected 1 validate enforce policy, found %v", len(validateEnforce))
 	}
-
-	mutate := cache.GetPolicies(Mutate, "Pod", nspace)
+	mutate := cache.GetPolicies(Mutate, podsGVRS.GroupVersionResource(), "", nspace)
 	if len(mutate) != 1 {
 		t.Errorf("expected 1 mutate policy, found %v", len(mutate))
 	}
-
-	generate := cache.GetPolicies(Generate, "Pod", nspace)
+	generate := cache.GetPolicies(Generate, podsGVRS.GroupVersionResource(), "", nspace)
 	if len(generate) != 1 {
 		t.Errorf("expected 1 generate policy, found %v", len(generate))
 	}
 }
 
 func Test_Get_Policies_Validate_Failure_Action_Overrides(t *testing.T) {
+	type testCase struct {
+		name             string
+		action           PolicyType
+		namespace        string
+		expectedPolicies int
+	}
+
 	cache := NewCache()
 	policy1 := newValidateAuditPolicy(t)
 	policy2 := newValidateEnforcePolicy(t)
+	finder := TestResourceFinder{}
+
 	key1, _ := kubecache.MetaNamespaceKeyFunc(policy1)
-	cache.Set(key1, policy1)
+	cache.Set(key1, policy1, finder)
+
 	key2, _ := kubecache.MetaNamespaceKeyFunc(policy2)
-	cache.Set(key2, policy2)
+	cache.Set(key2, policy2, finder)
 
-	validateAudit := cache.GetPolicies(ValidateAudit, "Pod", "")
-	if len(validateAudit) != 1 {
-		t.Errorf("expected 1 validate audit policy, found %v", len(validateAudit))
+	testCases := []testCase{
+		{name: "ValidateAudit with no namespace", action: ValidateAudit, namespace: "", expectedPolicies: 1},
+		{name: "ValidateEnforce with no namespace", action: ValidateEnforce, namespace: "", expectedPolicies: 1},
+		{name: "ValidateAudit with test namespace", action: ValidateAudit, namespace: "test", expectedPolicies: 2},
+		{name: "ValidateEnforce with test namespace", action: ValidateEnforce, namespace: "test", expectedPolicies: 0},
+		{name: "ValidateAudit with default namespace", action: ValidateAudit, namespace: "default", expectedPolicies: 0},
+		{name: "ValidateEnforce with default namespace", action: ValidateEnforce, namespace: "default", expectedPolicies: 2},
+		{name: "ValidateEnforce with unmatched namespace in failureActionOverrides", action: ValidateEnforce, namespace: "nonexistent", expectedPolicies: 1},
+		{name: "ValidateAudit with unmatched namespace in failureActionOverrides", action: ValidateAudit, namespace: "nonexistent", expectedPolicies: 1},
 	}
 
-	validateEnforce := cache.GetPolicies(ValidateEnforce, "Pod", "")
-	if len(validateEnforce) != 1 {
-		t.Errorf("expected 1 validate enforce policy, found %v", len(validateEnforce))
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			policies := cache.GetPolicies(tc.action, podsGVRS.GroupVersionResource(), "", tc.namespace)
+			require.Equal(t, tc.expectedPolicies, len(policies), "unexpected number of policies")
+		})
 	}
-
-	validateAudit = cache.GetPolicies(ValidateAudit, "Pod", "test")
-	if len(validateAudit) != 2 {
-		t.Errorf("expected 2 validate audit policy, found %v", len(validateAudit))
-	}
-
-	validateEnforce = cache.GetPolicies(ValidateEnforce, "Pod", "test")
-	if len(validateEnforce) != 0 {
-		t.Errorf("expected 0 validate enforce policy, found %v", len(validateEnforce))
-	}
-
-	validateAudit = cache.GetPolicies(ValidateAudit, "Pod", "default")
-	if len(validateAudit) != 0 {
-		t.Errorf("expected 0 validate audit policy, found %v", len(validateAudit))
-	}
-
-	validateEnforce = cache.GetPolicies(ValidateEnforce, "Pod", "default")
-	if len(validateEnforce) != 2 {
-		t.Errorf("expected 2 validate enforce policy, found %v", len(validateEnforce))
-	}
-
 }

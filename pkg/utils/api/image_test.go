@@ -4,10 +4,13 @@ import (
 	"testing"
 
 	kyvernov1 "github.com/kyverno/kyverno/api/kyverno/v1"
-	"github.com/kyverno/kyverno/pkg/engine/utils"
+	"github.com/kyverno/kyverno/pkg/config"
 	imageutils "github.com/kyverno/kyverno/pkg/utils/image"
+	kubeutils "github.com/kyverno/kyverno/pkg/utils/kube"
 	"gotest.tools/assert"
 )
+
+var cfg = config.NewDefaultConfiguration(false)
 
 func Test_extractImageInfo(t *testing.T) {
 	tests := []struct {
@@ -21,10 +24,12 @@ func Test_extractImageInfo(t *testing.T) {
 				"initContainers": {
 					"init": {
 						imageutils.ImageInfo{
-							Registry: "index.docker.io",
-							Name:     "busybox",
-							Path:     "busybox",
-							Tag:      "v1.2.3",
+							Registry:         "index.docker.io",
+							Name:             "busybox",
+							Path:             "busybox",
+							Tag:              "v1.2.3",
+							Reference:        "index.docker.io/busybox:v1.2.3",
+							ReferenceWithTag: "index.docker.io/busybox:v1.2.3",
 						},
 						"/spec/initContainers/0/image",
 					},
@@ -32,10 +37,12 @@ func Test_extractImageInfo(t *testing.T) {
 				"containers": {
 					"nginx": {
 						imageutils.ImageInfo{
-							Registry: "docker.io",
-							Name:     "nginx",
-							Path:     "nginx",
-							Tag:      "latest",
+							Registry:         "docker.io",
+							Name:             "nginx",
+							Path:             "nginx",
+							Tag:              "latest",
+							Reference:        "docker.io/nginx:latest",
+							ReferenceWithTag: "docker.io/nginx:latest",
 						},
 						"/spec/containers/0/image",
 					},
@@ -43,10 +50,12 @@ func Test_extractImageInfo(t *testing.T) {
 				"ephemeralContainers": {
 					"ephemeral": {
 						imageutils.ImageInfo{
-							Registry: "docker.io",
-							Name:     "nginx",
-							Path:     "test/nginx",
-							Tag:      "latest",
+							Registry:         "docker.io",
+							Name:             "nginx",
+							Path:             "test/nginx",
+							Tag:              "latest",
+							Reference:        "docker.io/test/nginx:latest",
+							ReferenceWithTag: "docker.io/test/nginx:latest",
 						},
 						"/spec/ephemeralContainers/0/image",
 					},
@@ -59,10 +68,12 @@ func Test_extractImageInfo(t *testing.T) {
 				"containers": {
 					"nginx": {
 						imageutils.ImageInfo{
-							Registry: "docker.io",
-							Name:     "nginx",
-							Path:     "test/nginx",
-							Tag:      "latest",
+							Registry:         "docker.io",
+							Name:             "nginx",
+							Path:             "test/nginx",
+							Tag:              "latest",
+							Reference:        "docker.io/test/nginx:latest",
+							ReferenceWithTag: "docker.io/test/nginx:latest",
 						},
 						"/spec/containers/0/image",
 					},
@@ -75,11 +86,13 @@ func Test_extractImageInfo(t *testing.T) {
 				"initContainers": {
 					"init": {
 						imageutils.ImageInfo{
-							Registry: "fictional.registry.example:10443",
-							Name:     "imagename",
-							Path:     "imagename",
-							Tag:      "tag",
-							Digest:   "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+							Registry:         "fictional.registry.example:10443",
+							Name:             "imagename",
+							Path:             "imagename",
+							Tag:              "tag",
+							Digest:           "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+							Reference:        "fictional.registry.example:10443/imagename@sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+							ReferenceWithTag: "fictional.registry.example:10443/imagename:tag",
 						},
 						"/spec/template/spec/initContainers/0/image",
 					},
@@ -87,10 +100,12 @@ func Test_extractImageInfo(t *testing.T) {
 				"containers": {
 					"myapp": {
 						imageutils.ImageInfo{
-							Registry: "fictional.registry.example:10443",
-							Name:     "imagename",
-							Path:     "imagename",
-							Tag:      "latest",
+							Registry:         "fictional.registry.example:10443",
+							Name:             "imagename",
+							Path:             "imagename",
+							Tag:              "latest",
+							Reference:        "fictional.registry.example:10443/imagename:latest",
+							ReferenceWithTag: "fictional.registry.example:10443/imagename:latest",
 						},
 						"/spec/template/spec/containers/0/image",
 					},
@@ -98,11 +113,13 @@ func Test_extractImageInfo(t *testing.T) {
 				"ephemeralContainers": {
 					"ephemeral": {
 						imageutils.ImageInfo{
-							Registry: "fictional.registry.example:10443",
-							Name:     "imagename",
-							Path:     "imagename",
-							Tag:      "tag",
-							Digest:   "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+							Registry:         "fictional.registry.example:10443",
+							Name:             "imagename",
+							Path:             "imagename",
+							Tag:              "tag",
+							Digest:           "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+							Reference:        "fictional.registry.example:10443/imagename@sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+							ReferenceWithTag: "fictional.registry.example:10443/imagename:tag",
 						},
 						"/spec/template/spec/ephemeralContainers/0/image",
 					},
@@ -115,10 +132,12 @@ func Test_extractImageInfo(t *testing.T) {
 				"containers": {
 					"hello": {
 						imageutils.ImageInfo{
-							Registry: "test.example.com",
-							Name:     "my-app",
-							Path:     "test/my-app",
-							Tag:      "v2",
+							Registry:         "test.example.com",
+							Name:             "my-app",
+							Path:             "test/my-app",
+							Tag:              "v2",
+							Reference:        "test.example.com/test/my-app:v2",
+							ReferenceWithTag: "test.example.com/test/my-app:v2",
 						},
 						"/spec/jobTemplate/spec/template/spec/containers/0/image",
 					},
@@ -136,28 +155,34 @@ func Test_extractImageInfo(t *testing.T) {
 				"custom": {
 					"/spec/steps/0/image": {
 						imageutils.ImageInfo{
-							Registry: "docker.io",
-							Name:     "ubuntu",
-							Path:     "ubuntu",
-							Tag:      "latest",
+							Registry:         "docker.io",
+							Name:             "ubuntu",
+							Path:             "ubuntu",
+							Tag:              "latest",
+							Reference:        "docker.io/ubuntu:latest",
+							ReferenceWithTag: "docker.io/ubuntu:latest",
 						},
 						"/spec/steps/0/image",
 					},
 					"/spec/steps/1/image": {
 						imageutils.ImageInfo{
-							Registry: "gcr.io",
-							Name:     "build-example",
-							Path:     "example-builders/build-example",
-							Tag:      "latest",
+							Registry:         "gcr.io",
+							Name:             "build-example",
+							Path:             "example-builders/build-example",
+							Tag:              "latest",
+							Reference:        "gcr.io/example-builders/build-example:latest",
+							ReferenceWithTag: "gcr.io/example-builders/build-example:latest",
 						},
 						"/spec/steps/1/image",
 					},
 					"/spec/steps/2/image": {
 						imageutils.ImageInfo{
-							Registry: "gcr.io",
-							Name:     "push-example",
-							Path:     "example-builders/push-example",
-							Tag:      "latest",
+							Registry:         "gcr.io",
+							Name:             "push-example",
+							Path:             "example-builders/push-example",
+							Tag:              "latest",
+							Reference:        "gcr.io/example-builders/push-example:latest",
+							ReferenceWithTag: "gcr.io/example-builders/push-example:latest",
 						},
 						"/spec/steps/2/image",
 					},
@@ -174,19 +199,23 @@ func Test_extractImageInfo(t *testing.T) {
 				"steps": {
 					"dockerfile-pushexample": {
 						imageutils.ImageInfo{
-							Registry: "gcr.io",
-							Name:     "push-example",
-							Path:     "example-builders/push-example",
-							Tag:      "latest",
+							Registry:         "gcr.io",
+							Name:             "push-example",
+							Path:             "example-builders/push-example",
+							Tag:              "latest",
+							Reference:        "gcr.io/example-builders/push-example:latest",
+							ReferenceWithTag: "gcr.io/example-builders/push-example:latest",
 						},
 						"/spec/steps/1/image",
 					},
 					"ubuntu-example": {
 						imageutils.ImageInfo{
-							Registry: "docker.io",
-							Name:     "ubuntu",
-							Path:     "ubuntu",
-							Tag:      "latest",
+							Registry:         "docker.io",
+							Name:             "ubuntu",
+							Path:             "ubuntu",
+							Tag:              "latest",
+							Reference:        "docker.io/ubuntu:latest",
+							ReferenceWithTag: "docker.io/ubuntu:latest",
 						},
 						"/spec/steps/0/image",
 					},
@@ -204,12 +233,37 @@ func Test_extractImageInfo(t *testing.T) {
 				"steps": {
 					"echo": {
 						imageutils.ImageInfo{
-							Registry: "docker.io",
-							Name:     "alpine",
-							Path:     "alpine",
-							Tag:      "latest",
+							Registry:         "docker.io",
+							Name:             "alpine",
+							Path:             "alpine",
+							Tag:              "latest",
+							Reference:        "docker.io/alpine:latest",
+							ReferenceWithTag: "docker.io/alpine:latest",
 						},
 						"/spec/steps/0/image",
+					},
+				},
+			},
+		},
+		{
+			extractionConfig: kyvernov1.ImageExtractorConfigs{
+				"DataVolume": []kyvernov1.ImageExtractorConfig{
+					{Path: "/spec/source/registry/url", JMESPath: "trim_prefix(@, 'docker://')"},
+				},
+			},
+			raw: []byte(`{"apiVersion":"cdi.kubevirt.io/v1beta1","kind":"DataVolume","metadata":{"name":"registry-image-datavolume"},"spec":{"source":{"registry":{"url":"docker://kubevirt/fedora-cloud-registry-disk-demo"}},"pvc":{"accessModes":["ReadWriteOnce"],"resources":{"requests":{"storage":"5Gi"}}}}}`),
+			images: map[string]map[string]ImageInfo{
+				"custom": {
+					"/spec/source/registry/url": {
+						imageutils.ImageInfo{
+							Registry:         "docker.io",
+							Name:             "fedora-cloud-registry-disk-demo",
+							Path:             "kubevirt/fedora-cloud-registry-disk-demo",
+							Tag:              "latest",
+							Reference:        "docker.io/kubevirt/fedora-cloud-registry-disk-demo:latest",
+							ReferenceWithTag: "docker.io/kubevirt/fedora-cloud-registry-disk-demo:latest",
+						},
+						"/spec/source/registry/url",
 					},
 				},
 			},
@@ -217,9 +271,9 @@ func Test_extractImageInfo(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		resource, err := utils.ConvertToUnstructured(test.raw)
+		resource, err := kubeutils.BytesToUnstructured(test.raw)
 		assert.NilError(t, err)
-		images, err := ExtractImagesFromResource(*resource, test.extractionConfig)
+		images, err := ExtractImagesFromResource(*resource, test.extractionConfig, cfg)
 		assert.NilError(t, err)
 		assert.DeepEqual(t, test.images, images)
 	}

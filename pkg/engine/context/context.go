@@ -1,26 +1,40 @@
 package context
 
 import (
-	"encoding/json"
+	cont "context"
+	"encoding/csv"
+	"fmt"
+	"regexp"
 	"strings"
-	"sync"
 
-	jsonpatch "github.com/evanphx/json-patch/v5"
+	jsoniter "github.com/json-iterator/go"
 	kyvernov1 "github.com/kyverno/kyverno/api/kyverno/v1"
-	kyvernov1beta1 "github.com/kyverno/kyverno/api/kyverno/v1beta1"
+	kyvernov2 "github.com/kyverno/kyverno/api/kyverno/v2"
+	"github.com/kyverno/kyverno/pkg/config"
+	"github.com/kyverno/kyverno/pkg/engine/jmespath"
+	"github.com/kyverno/kyverno/pkg/engine/jsonutils"
 	"github.com/kyverno/kyverno/pkg/logging"
+	"github.com/kyverno/kyverno/pkg/toggle"
 	apiutils "github.com/kyverno/kyverno/pkg/utils/api"
-	"github.com/pkg/errors"
 	admissionv1 "k8s.io/api/admission/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 )
 
-var logger = logging.WithName("context")
+var (
+	logger       = logging.WithName("context")
+	json         = jsoniter.ConfigCompatibleWithStandardLibrary
+	ReservedKeys = regexp.MustCompile(`request|serviceAccountName|serviceAccountNamespace|element|elementIndex|@|images|image|([a-z_0-9]+\()[^{}]`)
+)
 
 // EvalInterface is used to query and inspect context data
+// TODO: move to contextapi to prevent circular dependencies
 type EvalInterface interface {
 	// Query accepts a JMESPath expression and returns matching data
 	Query(query string) (interface{}, error)
+
+	// Operation returns the admission operation i.e. "request.operation"
+	QueryOperation() string
 
 	// HasChanged accepts a JMESPath expression and compares matching data in the
 	// request.object and request.oldObject context fields. If the data has changed
@@ -30,9 +44,12 @@ type EvalInterface interface {
 }
 
 // Interface to manage context operations
+// TODO: move to contextapi to prevent circular dependencies
 type Interface interface {
+	EvalInterface
+
 	// AddRequest marshals and adds the admission request to the context
-	AddRequest(request *admissionv1.AdmissionRequest) error
+	AddRequest(request admissionv1.AdmissionRequest) error
 
 	// AddVariable adds a variable to the context
 	AddVariable(key string, value interface{}) error
@@ -49,14 +66,14 @@ type Interface interface {
 	// AddOldResource merges resource json under request.oldObject
 	AddOldResource(data map[string]interface{}) error
 
-	// AddTargetResource merges resource json under target
-	AddTargetResource(data map[string]interface{}) error
+	// SetTargetResource merges resource json under target
+	SetTargetResource(data map[string]interface{}) error
 
 	// AddOperation merges operation under request.operation
 	AddOperation(data string) error
 
 	// AddUserInfo merges userInfo json under kyverno.userInfo
-	AddUserInfo(userInfo kyvernov1beta1.RequestInfo) error
+	AddUserInfo(userInfo kyvernov2.RequestInfo) error
 
 	// AddServiceAccount merges ServiceAccount types
 	AddServiceAccount(userName string) error
@@ -65,20 +82,24 @@ type Interface interface {
 	AddNamespace(namespace string) error
 
 	// AddElement adds element info to the context
-	AddElement(data interface{}, index int) error
+	AddElement(data interface{}, index, nesting int) error
 
 	// AddImageInfo adds image info to the context
-	AddImageInfo(info apiutils.ImageInfo) error
+	AddImageInfo(info apiutils.ImageInfo, cfg config.Configuration) error
 
 	// AddImageInfos adds image infos to the context
-	AddImageInfos(resource *unstructured.Unstructured) error
+	AddImageInfos(resource *unstructured.Unstructured, cfg config.Configuration) error
+
+	// AddDeferredLoader adds a loader that is executed on first use (query)
+	// If deferred loading is disabled the loader is immediately executed.
+	AddDeferredLoader(loader DeferredLoader) error
 
 	// ImageInfo returns image infos present in the context
 	ImageInfo() map[string]map[string]apiutils.ImageInfo
 
 	// GenerateCustomImageInfo returns image infos as defined by a custom image extraction config
 	// and updates the context
-	GenerateCustomImageInfo(resource *unstructured.Unstructured, imageExtractorConfigs kyvernov1.ImageExtractorConfigs) (map[string]map[string]apiutils.ImageInfo, error)
+	GenerateCustomImageInfo(resource *unstructured.Unstructured, imageExtractorConfigs kyvernov1.ImageExtractorConfigs, cfg config.Configuration) (map[string]map[string]apiutils.ImageInfo, error)
 
 	// Checkpoint creates a copy of the current internal state and pushes it into a stack of stored states.
 	Checkpoint()
@@ -89,53 +110,80 @@ type Interface interface {
 	// Reset sets the internal state to the last checkpoint, but does not remove the checkpoint.
 	Reset()
 
-	EvalInterface
-
-	// AddJSON  merges the json with context
-	addJSON(dataRaw []byte) error
+	// AddJSON  merges the json map with context
+	addJSON(dataMap map[string]interface{}, overwriteMaps bool) error
 }
 
 // Context stores the data resources as JSON
 type context struct {
-	mutex              sync.RWMutex
-	jsonRaw            []byte
-	jsonRawCheckpoints [][]byte
+	jp                 jmespath.Interface
+	jsonRaw            map[string]interface{}
+	jsonRawCheckpoints []map[string]interface{}
 	images             map[string]map[string]apiutils.ImageInfo
+	operation          kyvernov1.AdmissionOperation
+	deferred           DeferredLoaders
 }
 
 // NewContext returns a new context
-func NewContext() Interface {
-	return NewContextFromRaw([]byte(`{}`))
+func NewContext(jp jmespath.Interface) Interface {
+	return NewContextFromRaw(jp, map[string]interface{}{})
 }
 
 // NewContextFromRaw returns a new context initialized with raw data
-func NewContextFromRaw(raw []byte) Interface {
-	ctx := context{
+func NewContextFromRaw(jp jmespath.Interface, raw map[string]interface{}) Interface {
+	return &context{
+		jp:                 jp,
 		jsonRaw:            raw,
-		jsonRawCheckpoints: make([][]byte, 0),
+		jsonRawCheckpoints: make([]map[string]interface{}, 0),
+		deferred:           NewDeferredLoaders(),
 	}
-	return &ctx
 }
 
 // addJSON merges json data
-func (ctx *context) addJSON(dataRaw []byte) error {
-	ctx.mutex.Lock()
-	defer ctx.mutex.Unlock()
-	json, err := jsonpatch.MergeMergePatches(ctx.jsonRaw, dataRaw)
-	if err != nil {
-		return errors.Wrap(err, "failed to merge JSON data")
-	}
-	ctx.jsonRaw = json
+func (ctx *context) addJSON(dataMap map[string]interface{}, overwriteMaps bool) error {
+	mergeMaps(dataMap, ctx.jsonRaw, overwriteMaps)
 	return nil
 }
 
+func (ctx *context) QueryOperation() string {
+	if ctx.operation != "" {
+		return string(ctx.operation)
+	}
+
+	if requestMap, val := ctx.jsonRaw["request"].(map[string]interface{}); val {
+		if op, val := requestMap["operation"].(string); val {
+			return op
+		}
+	}
+
+	return ""
+}
+
 // AddRequest adds an admission request to context
-func (ctx *context) AddRequest(request *admissionv1.AdmissionRequest) error {
-	return addToContext(ctx, request, "request")
+func (ctx *context) AddRequest(request admissionv1.AdmissionRequest) error {
+	// an AdmissionRequest needs to be marshaled / unmarshaled as
+	// JSON to properly convert types of runtime.RawExtension
+	mapObj, err := jsonutils.DocumentToUntyped(request)
+	if err != nil {
+		return err
+	}
+
+	if err := addToContext(ctx, mapObj, false, "request"); err != nil {
+		return err
+	}
+
+	ctx.operation = kyvernov1.AdmissionOperation(request.Operation)
+	return nil
 }
 
 func (ctx *context) AddVariable(key string, value interface{}) error {
-	return addToContext(ctx, value, strings.Split(key, ".")...)
+	reader := csv.NewReader(strings.NewReader(key))
+	reader.Comma = '.'
+	if fields, err := reader.Read(); err != nil {
+		return err
+	} else {
+		return addToContext(ctx, value, false, fields...)
+	}
 }
 
 func (ctx *context) AddContextEntry(name string, dataRaw []byte) error {
@@ -144,7 +192,7 @@ func (ctx *context) AddContextEntry(name string, dataRaw []byte) error {
 		logger.Error(err, "failed to unmarshal the resource")
 		return err
 	}
-	return addToContext(ctx, data, name)
+	return addToContext(ctx, data, false, name)
 }
 
 func (ctx *context) ReplaceContextEntry(name string, dataRaw []byte) error {
@@ -154,36 +202,48 @@ func (ctx *context) ReplaceContextEntry(name string, dataRaw []byte) error {
 		return err
 	}
 	// Adding a nil entry to clean out any existing data in the context with the entry name
-	if err := addToContext(ctx, nil, name); err != nil {
+	if err := addToContext(ctx, nil, false, name); err != nil {
 		logger.Error(err, "unable to replace context entry", "context entry name", name)
 		return err
 	}
-	return addToContext(ctx, data, name)
+	return addToContext(ctx, data, false, name)
 }
 
 // AddResource data at path: request.object
 func (ctx *context) AddResource(data map[string]interface{}) error {
-	return addToContext(ctx, data, "request", "object")
+	clearLeafValue(ctx.jsonRaw, "request", "object")
+	return addToContext(ctx, data, false, "request", "object")
 }
 
 // AddOldResource data at path: request.oldObject
 func (ctx *context) AddOldResource(data map[string]interface{}) error {
-	return addToContext(ctx, data, "request", "oldObject")
+	clearLeafValue(ctx.jsonRaw, "request", "oldObject")
+	return addToContext(ctx, data, false, "request", "oldObject")
 }
 
 // AddTargetResource adds data at path: target
-func (ctx *context) AddTargetResource(data map[string]interface{}) error {
-	return addToContext(ctx, data, "target")
+func (ctx *context) SetTargetResource(data map[string]interface{}) error {
+	clearLeafValue(ctx.jsonRaw, "target")
+	return addToContext(ctx, data, false, "target")
 }
 
 // AddOperation data at path: request.operation
 func (ctx *context) AddOperation(data string) error {
-	return addToContext(ctx, data, "request", "operation")
+	if err := addToContext(ctx, data, false, "request", "operation"); err != nil {
+		return err
+	}
+
+	ctx.operation = kyvernov1.AdmissionOperation(data)
+	return nil
 }
 
 // AddUserInfo adds userInfo at path request.userInfo
-func (ctx *context) AddUserInfo(userRequestInfo kyvernov1beta1.RequestInfo) error {
-	return addToContext(ctx, userRequestInfo, "request")
+func (ctx *context) AddUserInfo(userRequestInfo kyvernov2.RequestInfo) error {
+	if data, err := toUnstructured(&userRequestInfo); err == nil {
+		return addToContext(ctx, data, false, "request")
+	} else {
+		return err
+	}
 }
 
 // AddServiceAccount removes prefix 'system:serviceaccount:' and namespace, then loads only SA name and SA namespace
@@ -203,103 +263,167 @@ func (ctx *context) AddServiceAccount(userName string) error {
 		saName = groups[1]
 		saNamespace = groups[0]
 	}
-	saNameObj := struct {
-		SA string `json:"serviceAccountName"`
-	}{
-		SA: saName,
+	data := map[string]interface{}{
+		"serviceAccountName":      saName,
+		"serviceAccountNamespace": saNamespace,
 	}
-	saNameRaw, err := json.Marshal(saNameObj)
-	if err != nil {
-		logger.Error(err, "failed to marshal the SA")
-		return err
-	}
-	if err := ctx.addJSON(saNameRaw); err != nil {
+	if err := ctx.addJSON(data, false); err != nil {
 		return err
 	}
 
-	saNsObj := struct {
-		SA string `json:"serviceAccountNamespace"`
-	}{
-		SA: saNamespace,
-	}
-	saNsRaw, err := json.Marshal(saNsObj)
-	if err != nil {
-		logger.Error(err, "failed to marshal the SA namespace")
-		return err
-	}
-	if err := ctx.addJSON(saNsRaw); err != nil {
-		return err
-	}
 	logger.V(4).Info("Adding service account", "service account name", saName, "service account namespace", saNamespace)
 	return nil
 }
 
 // AddNamespace merges resource json under request.namespace
 func (ctx *context) AddNamespace(namespace string) error {
-	return addToContext(ctx, namespace, "request", "namespace")
+	return addToContext(ctx, namespace, false, "request", "namespace")
 }
 
-func (ctx *context) AddElement(data interface{}, index int) error {
+func (ctx *context) AddElement(data interface{}, index, nesting int) error {
+	nestedElement := fmt.Sprintf("element%d", nesting)
+	nestedElementIndex := fmt.Sprintf("elementIndex%d", nesting)
 	data = map[string]interface{}{
-		"element":      data,
-		"elementIndex": index,
+		"element":          data,
+		nestedElement:      data,
+		"elementIndex":     int64(index),
+		nestedElementIndex: int64(index),
 	}
-	return addToContext(ctx, data)
+	return addToContext(ctx, data, true)
 }
 
-func (ctx *context) AddImageInfo(info apiutils.ImageInfo) error {
+func (ctx *context) AddImageInfo(info apiutils.ImageInfo, cfg config.Configuration) error {
 	data := map[string]interface{}{
-		"reference":        info.String(),
-		"referenceWithTag": info.ReferenceWithTag(),
+		"reference":        info.Reference,
+		"referenceWithTag": info.ReferenceWithTag,
 		"registry":         info.Registry,
 		"path":             info.Path,
 		"name":             info.Name,
 		"tag":              info.Tag,
 		"digest":           info.Digest,
 	}
-	return addToContext(ctx, data, "image")
+	return addToContext(ctx, data, false, "image")
 }
 
-func (ctx *context) AddImageInfos(resource *unstructured.Unstructured) error {
-	images, err := apiutils.ExtractImagesFromResource(*resource, nil)
+func (ctx *context) AddImageInfos(resource *unstructured.Unstructured, cfg config.Configuration) error {
+	imageInfoLoader := &ImageInfoLoader{
+		resource: resource,
+		eCtx:     ctx,
+		cfg:      cfg,
+	}
+	dl, err := NewDeferredLoader("images", imageInfoLoader, logger)
 	if err != nil {
 		return err
 	}
+	if toggle.FromContext(cont.Background()).EnableDeferredLoading() {
+		if err := ctx.AddDeferredLoader(dl); err != nil {
+			return err
+		}
+	} else {
+		if err := imageInfoLoader.LoadData(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (ctx *context) addImageInfos(images map[string]map[string]apiutils.ImageInfo) error {
 	if len(images) == 0 {
 		return nil
 	}
 	ctx.images = images
-
-	logging.V(4).Info("updated image info", "images", images)
-	return addToContext(ctx, images, "images")
+	utm, err := convertImagesToUnstructured(images)
+	if err != nil {
+		return err
+	}
+	logging.V(4).Info("updated image info", "images", utm)
+	return addToContext(ctx, utm, false, "images")
 }
 
-func (ctx *context) GenerateCustomImageInfo(resource *unstructured.Unstructured, imageExtractorConfigs kyvernov1.ImageExtractorConfigs) (map[string]map[string]apiutils.ImageInfo, error) {
-	images, err := apiutils.ExtractImagesFromResource(*resource, imageExtractorConfigs)
+type ImageInfoLoader struct {
+	resource  *unstructured.Unstructured
+	hasLoaded bool
+	eCtx      *context
+	cfg       config.Configuration
+}
+
+func (l *ImageInfoLoader) HasLoaded() bool {
+	return l.hasLoaded
+}
+
+func (l *ImageInfoLoader) LoadData() error {
+	images, err := apiutils.ExtractImagesFromResource(*l.resource, nil, l.cfg)
 	if err != nil {
-		return nil, errors.Wrapf(err, "failed to extract images")
+		return err
 	}
 
-	if len(images) == 0 {
-		logger.V(4).Info("no images found", "extractor", imageExtractorConfigs)
-		return nil, nil
+	return l.eCtx.addImageInfos(images)
+}
+
+func convertImagesToUnstructured(images map[string]map[string]apiutils.ImageInfo) (map[string]interface{}, error) {
+	results := map[string]interface{}{}
+	for containerType, v := range images {
+		imgMap := map[string]interface{}{}
+		for containerName := range v {
+			imageInfo := v[containerName]
+			img, err := toUnstructured(&imageInfo.ImageInfo)
+			if err != nil {
+				return nil, err
+			}
+
+			var pointer interface{} = imageInfo.Pointer
+			img["jsonPointer"] = pointer
+
+			imgMap[containerName] = img
+		}
+
+		results[containerType] = imgMap
 	}
 
-	return images, addToContext(ctx, images, "images")
+	return results, nil
+}
+
+func (ctx *context) GenerateCustomImageInfo(resource *unstructured.Unstructured, imageExtractorConfigs kyvernov1.ImageExtractorConfigs, cfg config.Configuration) (map[string]map[string]apiutils.ImageInfo, error) {
+	images, err := apiutils.ExtractImagesFromResource(*resource, imageExtractorConfigs, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to extract images: %w", err)
+	}
+
+	if err := ctx.addImageInfos(images); err != nil {
+		return nil, fmt.Errorf("failed to add images to context: %w", err)
+	}
+
+	return images, nil
 }
 
 func (ctx *context) ImageInfo() map[string]map[string]apiutils.ImageInfo {
+	// force load of image info from deferred loader
+	if len(ctx.images) == 0 {
+		if err := ctx.loadDeferred("images"); err != nil {
+			return map[string]map[string]apiutils.ImageInfo{}
+		}
+	}
 	return ctx.images
 }
 
 // Checkpoint creates a copy of the current internal state and
 // pushes it into a stack of stored states.
 func (ctx *context) Checkpoint() {
-	ctx.mutex.Lock()
-	defer ctx.mutex.Unlock()
-	jsonRawCheckpoint := make([]byte, len(ctx.jsonRaw))
-	copy(jsonRawCheckpoint, ctx.jsonRaw)
+	jsonRawCheckpoint := ctx.copyContext(ctx.jsonRaw)
 	ctx.jsonRawCheckpoints = append(ctx.jsonRawCheckpoints, jsonRawCheckpoint)
+}
+
+func (ctx *context) copyContext(in map[string]interface{}) map[string]interface{} {
+	out := make(map[string]interface{}, len(in))
+	for k, v := range in {
+		if ReservedKeys.MatchString(k) {
+			out[k] = v
+		} else {
+			out[k] = runtime.DeepCopyJSONValue(v)
+		}
+	}
+
+	return out
 }
 
 // Restore sets the internal state to the last checkpoint, and removes the checkpoint.
@@ -312,17 +436,31 @@ func (ctx *context) Reset() {
 	ctx.reset(false)
 }
 
-func (ctx *context) reset(remove bool) {
-	ctx.mutex.Lock()
-	defer ctx.mutex.Unlock()
-	if len(ctx.jsonRawCheckpoints) == 0 {
-		return
+func (ctx *context) reset(restore bool) {
+	if ctx.resetCheckpoint(restore) {
+		ctx.deferred.Reset(restore, len(ctx.jsonRawCheckpoints))
 	}
+}
+
+func (ctx *context) resetCheckpoint(restore bool) bool {
+	if len(ctx.jsonRawCheckpoints) == 0 {
+		return false
+	}
+
 	n := len(ctx.jsonRawCheckpoints) - 1
 	jsonRawCheckpoint := ctx.jsonRawCheckpoints[n]
-	ctx.jsonRaw = make([]byte, len(jsonRawCheckpoint))
-	copy(ctx.jsonRaw, jsonRawCheckpoint)
-	if remove {
+
+	if restore {
 		ctx.jsonRawCheckpoints = ctx.jsonRawCheckpoints[:n]
+		ctx.jsonRaw = jsonRawCheckpoint
+	} else {
+		ctx.jsonRaw = ctx.copyContext(jsonRawCheckpoint)
 	}
+
+	return true
+}
+
+func (ctx *context) AddDeferredLoader(dl DeferredLoader) error {
+	ctx.deferred.Add(dl, len(ctx.jsonRawCheckpoints))
+	return nil
 }

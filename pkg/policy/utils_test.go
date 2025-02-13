@@ -4,209 +4,248 @@ import (
 	"testing"
 
 	kyverno "github.com/kyverno/kyverno/api/kyverno/v1"
-	"gotest.tools/assert"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
-func Test_isMatchResourcesAllValid(t *testing.T) {
-
+func Test_resourceMatches(t *testing.T) {
 	tests := []struct {
-		name string
-		rule kyverno.Rule
-		want bool
+		name               string
+		match              kyverno.ResourceDescription
+		res                unstructured.Unstructured
+		isNamespacedPolicy bool
+		want               bool
 	}{
 		{
-			name: "All with no kinds are invalid",
-			rule: kyverno.Rule{
-				MatchResources: kyverno.MatchResources{
-					All: []kyverno.ResourceFilter{
-						{
-							ResourceDescription: kyverno.ResourceDescription{
-								Kinds: []string{},
-							},
-						},
+			name: "Matching resource based on its name",
+			match: kyverno.ResourceDescription{
+				Kinds: []string{"Pod"},
+				Names: []string{"my-pod", "test-pod"},
+			},
+			res: unstructured.Unstructured{
+				Object: map[string]interface{}{
+					"apiVersion": "v1",
+					"kind":       "Pod",
+					"metadata": map[string]interface{}{
+						"name": "my-pod",
 					},
 				},
 			},
-			want: false,
-		},
-
-		{
-			name: "All with same kind are valid",
-			rule: kyverno.Rule{
-				MatchResources: kyverno.MatchResources{
-					All: []kyverno.ResourceFilter{
-						{
-							ResourceDescription: kyverno.ResourceDescription{
-								Kinds: []string{"kind1"},
-							},
-						},
-						{
-							ResourceDescription: kyverno.ResourceDescription{
-								Kinds: []string{"kind1"},
-							},
-						},
-					},
-				},
-			},
-			want: true,
+			isNamespacedPolicy: false,
+			want:               true,
 		},
 		{
-			name: "All with different kinds are invalid",
-			rule: kyverno.Rule{
-				MatchResources: kyverno.MatchResources{
-					All: []kyverno.ResourceFilter{
-						{
-							ResourceDescription: kyverno.ResourceDescription{
-								Kinds: []string{"kind1"},
-							},
-						},
-						{
-							ResourceDescription: kyverno.ResourceDescription{
-								Kinds: []string{"kind2"},
-							},
-						},
+			name: "Non-matching resource based on its name",
+			match: kyverno.ResourceDescription{
+				Kinds: []string{"Pod"},
+				Names: []string{"test-pod", "test-pod-1"},
+			},
+			res: unstructured.Unstructured{
+				Object: map[string]interface{}{
+					"apiVersion": "v1",
+					"kind":       "Pod",
+					"metadata": map[string]interface{}{
+						"name": "my-pod",
 					},
 				},
 			},
-			want: false,
+			isNamespacedPolicy: false,
+			want:               false,
+		},
+		{
+			name: "Matching resource with a wildcard name",
+			match: kyverno.ResourceDescription{
+				Kinds: []string{"Pod"},
+				Name:  "my-*",
+			},
+			res: unstructured.Unstructured{
+				Object: map[string]interface{}{
+					"apiVersion": "v1",
+					"kind":       "Pod",
+					"metadata": map[string]interface{}{
+						"name": "my-pod",
+					},
+				},
+			},
+			isNamespacedPolicy: false,
+			want:               true,
+		},
+		{
+			name: "Non-matching resource with a wildcard name",
+			match: kyverno.ResourceDescription{
+				Kinds: []string{"Pod"},
+				Name:  "my-*",
+			},
+			res: unstructured.Unstructured{
+				Object: map[string]interface{}{
+					"apiVersion": "v1",
+					"kind":       "Pod",
+					"metadata": map[string]interface{}{
+						"name": "test-pod",
+					},
+				},
+			},
+			isNamespacedPolicy: false,
+			want:               false,
+		},
+		{
+			name: "Matching resource with multiple wildcard names",
+			match: kyverno.ResourceDescription{
+				Kinds: []string{"Pod"},
+				Names: []string{"my-*", "test-pod"},
+			},
+			res: unstructured.Unstructured{
+				Object: map[string]interface{}{
+					"apiVersion": "v1",
+					"kind":       "Pod",
+					"metadata": map[string]interface{}{
+						"name": "my-pod",
+					},
+				},
+			},
+			isNamespacedPolicy: false,
+			want:               true,
+		},
+		{
+			name: "Non-matching resource with multiple wildcard names",
+			match: kyverno.ResourceDescription{
+				Kinds: []string{"Pod"},
+				Names: []string{"my-*", "test-pod"},
+			},
+			res: unstructured.Unstructured{
+				Object: map[string]interface{}{
+					"apiVersion": "v1",
+					"kind":       "Pod",
+					"metadata": map[string]interface{}{
+						"name": "pod",
+					},
+				},
+			},
+			isNamespacedPolicy: false,
+			want:               false,
+		},
+		{
+			name: "Matching resource based on its namespace",
+			match: kyverno.ResourceDescription{
+				Namespaces: []string{"test-ns"},
+				Kinds:      []string{"Pod"},
+			},
+			res: unstructured.Unstructured{
+				Object: map[string]interface{}{
+					"apiVersion": "v1",
+					"kind":       "Pod",
+					"metadata": map[string]interface{}{
+						"name":      "my-pod",
+						"namespace": "test-ns",
+					},
+				},
+			},
+			isNamespacedPolicy: false,
+			want:               true,
+		},
+		{
+			name: "Non-matching resource based on its namespace",
+			match: kyverno.ResourceDescription{
+				Namespaces: []string{"test-ns"},
+				Kinds:      []string{"Pod"},
+			},
+			res: unstructured.Unstructured{
+				Object: map[string]interface{}{
+					"apiVersion": "v1",
+					"kind":       "Pod",
+					"metadata": map[string]interface{}{
+						"name":      "my-pod",
+						"namespace": "default",
+					},
+				},
+			},
+			isNamespacedPolicy: false,
+			want:               false,
+		},
+		{
+			name: "Matching resource with a namespaced policy",
+			match: kyverno.ResourceDescription{
+				Namespaces: []string{"test-ns"},
+				Kinds:      []string{"Pod"},
+			},
+			res: unstructured.Unstructured{
+				Object: map[string]interface{}{
+					"apiVersion": "v1",
+					"kind":       "Pod",
+					"metadata": map[string]interface{}{
+						"name":      "my-pod",
+						"namespace": "default",
+					},
+				},
+			},
+			isNamespacedPolicy: true,
+			want:               true,
+		},
+		{
+			name: "Matching resource based on its name and namespace",
+			match: kyverno.ResourceDescription{
+				Namespaces: []string{"test-ns"},
+				Kinds:      []string{"Pod"},
+				Names:      []string{"my-pod"},
+			},
+			res: unstructured.Unstructured{
+				Object: map[string]interface{}{
+					"apiVersion": "v1",
+					"kind":       "Pod",
+					"metadata": map[string]interface{}{
+						"name":      "my-pod",
+						"namespace": "test-ns",
+					},
+				},
+			},
+			isNamespacedPolicy: false,
+			want:               true,
+		},
+		{
+			name: "Non-matching resource based on its name and namespace",
+			match: kyverno.ResourceDescription{
+				Namespaces: []string{"test-ns"},
+				Kinds:      []string{"Pod"},
+				Names:      []string{"my-pod"},
+			},
+			res: unstructured.Unstructured{
+				Object: map[string]interface{}{
+					"apiVersion": "v1",
+					"kind":       "Pod",
+					"metadata": map[string]interface{}{
+						"name":      "my-pod",
+						"namespace": "default",
+					},
+				},
+			},
+			isNamespacedPolicy: false,
+			want:               false,
+		},
+		{
+			name: "Non-matching resource based on its name and namespace",
+			match: kyverno.ResourceDescription{
+				Namespaces: []string{"test-ns"},
+				Kinds:      []string{"Pod"},
+				Names:      []string{"test-pod-1", "test-pod-2"},
+			},
+			res: unstructured.Unstructured{
+				Object: map[string]interface{}{
+					"apiVersion": "v1",
+					"kind":       "Pod",
+					"metadata": map[string]interface{}{
+						"name":      "my-pod",
+						"namespace": "test-ns",
+					},
+				},
+			},
+			isNamespacedPolicy: false,
+			want:               false,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.DeepEqual(t, tt.want, isMatchResourcesAllValid(tt.rule))
-		})
-	}
-}
-
-func Test_fetchUniqueKinds(t *testing.T) {
-
-	tests := []struct {
-		name string
-		rule kyverno.Rule
-		want []string
-	}{
-		{
-			name: "Unique MatchResource kinds",
-			rule: kyverno.Rule{
-				MatchResources: kyverno.MatchResources{
-					ResourceDescription: kyverno.ResourceDescription{
-						Kinds: []string{"kind1", "kind2"},
-					},
-				},
-			},
-			want: []string{"kind1", "kind2"},
-		},
-
-		{
-			name: "Any with same kind are valid",
-			rule: kyverno.Rule{
-				MatchResources: kyverno.MatchResources{
-					Any: []kyverno.ResourceFilter{
-						{
-							ResourceDescription: kyverno.ResourceDescription{
-								Kinds: []string{"kind1", "kind2"},
-							},
-						},
-						{
-							ResourceDescription: kyverno.ResourceDescription{
-								Kinds: []string{"kind1", "kind3"},
-							},
-						},
-					},
-				},
-			},
-			want: []string{"kind1", "kind2", "kind3"},
-		},
-		{
-			name: "Match with All and Any kind",
-			rule: kyverno.Rule{
-				MatchResources: kyverno.MatchResources{
-					All: []kyverno.ResourceFilter{
-						{
-							ResourceDescription: kyverno.ResourceDescription{
-								Kinds: []string{"kind1"},
-							},
-						},
-					},
-					Any: []kyverno.ResourceFilter{
-						{
-							ResourceDescription: kyverno.ResourceDescription{
-								Kinds: []string{"kind1", "kind2"},
-							},
-						},
-					},
-				},
-			},
-			want: []string{"kind1", "kind2"},
-		},
-		{
-			name: "Match with different All and Any kind",
-			rule: kyverno.Rule{
-				MatchResources: kyverno.MatchResources{
-					All: []kyverno.ResourceFilter{
-						{
-							ResourceDescription: kyverno.ResourceDescription{
-								Kinds: []string{"kind4", "kind5"},
-							},
-						},
-					},
-					Any: []kyverno.ResourceFilter{
-						{
-							ResourceDescription: kyverno.ResourceDescription{
-								Kinds: []string{"kind1", "kind2"},
-							},
-						},
-					},
-				},
-			},
-			want: []string{"kind1", "kind2"},
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.DeepEqual(t, fetchUniqueKinds(tt.rule), tt.want)
-		})
-	}
-}
-
-func Test_convertlist(t *testing.T) {
-	tests := []struct {
-		name   string
-		ulists []unstructured.Unstructured
-		want   []*unstructured.Unstructured
-	}{
-		{
-			name: "Convert list",
-			ulists: []unstructured.Unstructured{
-				{
-					Object: map[string]interface{}{
-						"kind": "kind1",
-					},
-				},
-				{
-					Object: map[string]interface{}{
-						"namespace": "ns-1",
-					},
-				},
-			},
-			want: []*unstructured.Unstructured{
-				{
-					Object: map[string]interface{}{
-						"kind": "kind1",
-					},
-				},
-				{
-					Object: map[string]interface{}{
-						"namespace": "ns-1",
-					},
-				},
-			},
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.DeepEqual(t, convertlist(tt.ulists), tt.want)
+			if got := resourceMatches(tt.match, tt.res, tt.isNamespacedPolicy); got != tt.want {
+				t.Errorf("resourceMatches() = %v, want %v", got, tt.want)
+			}
 		})
 	}
 }

@@ -1,14 +1,12 @@
 package patch
 
 import (
-	"fmt"
 	"testing"
 
-	"github.com/kyverno/kyverno/pkg/engine/response"
-
 	"github.com/ghodss/yaml"
-	"github.com/kyverno/kyverno/pkg/logging"
+	"github.com/go-logr/logr"
 	assert "github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
@@ -36,28 +34,24 @@ func TestTypeConversion(t *testing.T) {
   value: my-nginx
 `)
 
-	expectedPatches := [][]byte{
-		[]byte(`{"op":"replace","path":"/spec/template/spec/containers/0/name","value":"my-nginx"}`),
-	}
+	expectedBytes := []byte(`{"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"myDeploy"},"spec":{"replica":2,"template":{"metadata":{"labels":{"old-label":"old-value"}},"spec":{"containers":[{"image":"nginx","name":"my-nginx"}]}}}}`)
 
 	// serialize resource
 	inputJSON, err := yaml.YAMLToJSON(inputBytes)
-	assert.Nil(t, err)
+	require.NoError(t, err)
 
 	var resource unstructured.Unstructured
 	err = resource.UnmarshalJSON(inputJSON)
-	assert.Nil(t, err)
+	require.NoError(t, err)
 
 	jsonPatches, err := yaml.YAMLToJSON(patchesJSON6902)
-	assert.Nil(t, err)
+	require.NoError(t, err)
 	// apply patches
-	resp, _ := ProcessPatchJSON6902("type-conversion", jsonPatches, resource, logging.GlobalLogger())
-	if !assert.Equal(t, response.RuleStatusPass, resp.Status) {
-		t.Fatal(resp.Message)
-	}
-
-	assert.Equal(t, expectedPatches, resp.Patches,
-		fmt.Sprintf("expectedPatches: %s\ngeneratedPatches: %s", string(expectedPatches[0]), string(resp.Patches[0])))
+	resourceBytes, err := resource.MarshalJSON()
+	require.NoError(t, err)
+	patchedBytes, err := ProcessPatchJSON6902(logr.Discard(), jsonPatches, resourceBytes)
+	require.NoError(t, err)
+	require.Equal(t, string(expectedBytes), string(patchedBytes))
 }
 
 func TestJsonPatch(t *testing.T) {
@@ -182,7 +176,6 @@ spec:
 
 	for _, testCase := range testCases {
 		t.Run(testCase.testName, func(t *testing.T) {
-
 			expectedBytes, err := yaml.YAMLToJSON(testCase.expected)
 			assert.Nil(t, err)
 
@@ -220,7 +213,7 @@ spec:
 `,
 			patches: `
 - path: "/spec/nodeSelector"
-  op: add 
+  op: add
   value: {"node.kubernetes.io/role": "test"}
 `,
 			expectedPatches: map[string]bool{
@@ -372,8 +365,7 @@ spec:
 		assert.Nil(t, err)
 
 		for _, p := range generatedP {
-			assert.Equal(t, test.expectedPatches[string(p)], true,
-				fmt.Sprintf("test: %s\nunexpected patch: %s\nexpect one of: %v", test.name, string(p), test.expectedPatches))
+			assert.Equal(t, test.expectedPatches[string(p.Json())], true)
 		}
 	}
 }

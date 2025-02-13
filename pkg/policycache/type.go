@@ -8,8 +8,8 @@ const (
 	Mutate PolicyType = 1 << iota
 	ValidateEnforce
 	ValidateAudit
+	ValidateAuditWarn
 	Generate
 	VerifyImagesMutate
 	VerifyImagesValidate
-	VerifyYAML
 )
